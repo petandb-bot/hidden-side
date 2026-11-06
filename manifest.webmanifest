@@ -1,7 +1,7 @@
 {
   "name": "HIDDEN SIDE — Image Excavator",
   "short_name": "HIDDEN SIDE",
-  "description": "WebGL1で写真と映像の深層を露出する。GPU省電力・時間残滓機能搭載。",
+  "description": "An image excavator. WebGL materials, latent structures, and temporal residues.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

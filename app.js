@@ -1,30 +1,17 @@
-/*
- * HIDDEN SIDE v0.2 — p5.js 1.11.13 + WebGL1
- * GPU処理はp5.jsのWebGL1コンテキストを直接利用。入力テクスチャは再利用し、プレビューと書き出しの描画解像度を分離。
- * 画像／映像はローカルで処理し、サーバーへアップロードしない。
- * 書き出しは実時間のMediaRecorder録画。初期版は無音・最大45秒。
- */
+/* HIDDEN SIDE v0.3 | p5.js 1.11.13 | WebGL1 | local GPU processing */
 'use strict';
 
-const MODES = [
-  '暗部が空洞化し、皮膚や物質の境界から異質な色層が浮き上がる。',
-  '銀塩ネガのような明暗反転。青い輪郭と残された色温度が漂う。',
-  '明度勾配を仮想的な凹凸へ変換。光の方向で表面を発掘する。',
-  '像の境界から色が滲み、膜と染みが互いを侵食する。',
-  '輪郭と色の位置がずれて、同じ像の複数の時間が重なる。'
-];
 const $ = (id) => document.getElementById(id);
 const dom = {};
 const isTouchDevice = /iPad|iPhone|iPod|Android/i.test(navigator.userAgent);
 const MAX_RECORD_SECONDS = 45;
-// 通常表示の長辺を抑え、録画開始時のみ高解像度に切り替える。
 const PERFORMANCE = {
   eco: { preview: 520, video: 720, fps: 24 },
   balanced: { preview: 720, video: 960, fps: 24 },
   fine: { preview: 960, video: 1280, fps: 30 }
 };
 const MAX_PHOTO_SOURCE = 2048;
-const MAX_HISTORY_EDGE = 512;
+const MAX_HISTORY_EDGE = 448;
 
 
 const state = {
@@ -36,16 +23,16 @@ const state = {
   videoReady: false, isRecording: false, recorder: null, stream: null,
   recordStartedAt: 0, recordedBlob: null, recordedName: '',
   pointer: [0.5, 0.5], touchForce: 0, touchTarget: 0,
+  kinetic: 0, kineticTarget: 0, pointerTime: 0, pointerIsDown: false,
   activeURL: null, firstDraw: true, renderingError: false,
-  historyReady: false, historyW: 0, historyH: 0
+  historyReady: false, historyW: 0, historyH: 0,
+  lastRenderTime: 0, sourceGeneration: 0
 };
 
 let gl, canvas, program, sourceTexture, buffer, sourceCanvas, sourceCtx, u;
 let feedbackTextures = [], feedbackFramebuffer = null, feedbackReadIndex = 0;
 let aPosition = -1, aUv = -1;
 let lastTimestamp = performance.now();
-
-// p5.jsの描画ライフサイクル。UIは通常のDOMで管理する。
 function setup() {
   setAttributes({ version: 1, alpha: false, depth: false, stencil: false,
     antialias: false, preserveDrawingBuffer: true });
@@ -57,16 +44,15 @@ function setup() {
   try { initGL(); }
   catch (error) {
     state.renderingError = true;
-    setStatus(`WebGLを初期化できません: ${error.message}`, true);
+    setStatus(`GPU INIT FAILED: ${error.message}`, true);
     console.error(error);
   }
   resizePreview();
-  // iOSがGPUを回収した場合、ユーザー操作を失わずテクスチャを再構築する。
   canvas.addEventListener('webglcontextlost', event => {
     event.preventDefault();
     state.renderingError = true;
     if (state.isRecording) stopRecording();
-    setStatus('GPU接続が一時的に失われました。復旧を待っています。', true);
+    setStatus('GPU CONTEXT LOST', true);
   });
   canvas.addEventListener('webglcontextrestored', () => {
     try {
@@ -77,8 +63,8 @@ function setup() {
       }
       initFeedback();
       state.renderingError = false;
-      setStatus('GPUを再初期化しました。');
-    } catch (error) { setStatus(`GPU復旧エラー: ${error.message}`, true); }
+      setStatus('GPU RESTORED');
+    } catch (error) { setStatus(`GPU RESTORE FAILED: ${error.message}`, true); }
   });
 }
 
@@ -95,7 +81,9 @@ function draw() {
   const now = performance.now();
   const dt = Math.min((now - lastTimestamp) / 1000, 0.1);
   lastTimestamp = now;
-  state.touchForce += (state.touchTarget - state.touchForce) * Math.min(1, dt * 8);
+  state.touchForce += (state.touchTarget - state.touchForce) * Math.min(1, dt * 11);
+  state.kinetic += (state.kineticTarget - state.kinetic) * Math.min(1, dt * 7);
+  if (!state.pointerIsDown) state.kineticTarget *= Math.exp(-dt*13);
 
   try {
     if (state.type === 'video' && state.element && state.element.readyState >= 2) {
@@ -118,12 +106,10 @@ function draw() {
     }
     renderFrame(now * 0.001);
   } catch (error) {
-    // 端末依存の一時的な動画フレーム未準備は次フレームで再試行。
     if (state.type === 'video') state.frameDirty = true;
     if (!state.renderingError) {
-      setStatus(`描画エラー: ${error.message}`, true);
+      setStatus(`RENDER FAILED: ${error.message}`, true);
       console.error(error);
-      // 動画フレームの一時的な転送失敗は次フレームで復帰を試みる。
       if (state.type !== 'video') state.renderingError = true;
     }
   }
@@ -146,10 +132,12 @@ const FRAGMENT_SHADER = `
   uniform sampler2D u_source;
   uniform sampler2D u_history;
   uniform float u_historyMix;
+  uniform float u_memory;
   uniform vec2 u_texel;
   uniform vec2 u_resolution;
   uniform vec2 u_pointer;
   uniform float u_touch;
+  uniform float u_kinetic;
   uniform float u_time;
   uniform float u_seed;
   uniform float u_mode;
@@ -166,135 +154,161 @@ const FRAGMENT_SHADER = `
     return fract(p.x * p.y);
   }
   float noise2(vec2 p) {
-    vec2 i = floor(p); vec2 f = fract(p);
+    vec2 i = floor(p);
+    vec2 f = fract(p);
     vec2 s = f*f*(3.0-2.0*f);
-    return mix(mix(hash21(i), hash21(i+vec2(1.,0.)), s.x),
-               mix(hash21(i+vec2(0.,1.)), hash21(i+vec2(1.,1.)), s.x), s.y);
+    return mix(mix(hash21(i),hash21(i+vec2(1.0,0.0)),s.x),
+               mix(hash21(i+vec2(0.0,1.0)),hash21(i+vec2(1.0,1.0)),s.x),s.y);
   }
   float fbm(vec2 p) {
-    float n = .0; float a = .5;
-    for (int i=0; i<4; i++) { n += a * noise2(p); p = p*2.07+vec2(12.3,5.4); a *= .5; }
+    float n = 0.0;
+    float a = 0.5;
+    for (int i=0; i<4; i++) {
+      n += a*noise2(p);
+      p = p*2.07 + vec2(12.3,5.4);
+      a *= 0.5;
+    }
     return n;
   }
-  vec3 src(vec2 uv) { return texture2D(u_source, clamp(uv, vec2(.001), vec2(.999))).rgb; }
+  vec3 src(vec2 uv) {
+    return texture2D(u_source,clamp(uv,vec2(0.001),vec2(0.999))).rgb;
+  }
+  vec3 past(vec2 uv) {
+    return texture2D(u_history,clamp(uv,vec2(0.001),vec2(0.999))).rgb;
+  }
 
   void main() {
     vec2 uv = v_uv;
-    vec2 ax = vec2(u_resolution.x/u_resolution.y, 1.0);
-    float t = u_time * u_drift;
-    float e = u_erosion;
+    vec2 aspect = vec2(u_resolution.x/u_resolution.y,1.0);
     float d = u_depth;
-    vec2 wavep = uv * vec2(5.7, 9.1) + vec2(u_seed, u_seed*.31);
-    float n = fbm(wavep + vec2(t*.27, -t*.19));
-    float medium = fbm(wavep*2.8 - vec2(t*.31, -t*.23));
-    float micro = hash21(floor(uv * u_resolution * .54) + u_seed * 13.5);
+    float e = u_erosion;
+    float t = u_time * u_drift * 0.92;
+    float kinetic = sat(u_kinetic);
+    vec2 field = uv*vec2(5.7,9.1) + vec2(u_seed,u_seed*0.31);
+    float n = fbm(field + vec2(t*0.27,-t*0.19));
+    float medium = fbm(field*2.8 - vec2(t*0.31,-t*0.23));
+    float micro = hash21(floor(uv*u_resolution*0.54) + u_seed*13.5);
+    float dist = length((uv-u_pointer)*aspect);
+    float probe = exp(-dist*dist/(0.016+d*0.015)) * u_touch;
+    float gesture = probe*(0.42+kinetic*0.58);
 
-    // 指で触れた部分だけ、階調の内部に局所的な変形場が生まれる。
-    float dist = length((uv-u_pointer)*ax);
-    float probe = exp(-dist*dist / (.019 + d*.011)) * u_touch;
-    vec2 flow = vec2(noise2(wavep*1.6 + t*.4) - .5, noise2(wavep*1.5 + 12.8 - t*.35) - .5);
-    vec2 displaced = uv + flow * (.002 + e * .013) * (0.3 + u_drift)
-                       + flow * probe * .054;
-
-    // GHOSTのみ明確に大きい色ずれ。他モードは微細な肌理のずれに留める。
-    if (u_mode > 3.5) {
-      float row = floor(uv.y * 118.0 + t*1.7);
-      float breakRow = step(.944 - .035*e, hash21(vec2(row, floor(t*.7)+u_seed)));
-      displaced.x += breakRow * (noise2(vec2(row,t+u_seed))-.5) * (.07 * e);
+    vec2 flow = vec2(noise2(field*1.6+t*0.4)-0.5,
+                     noise2(field*1.5+12.8-t*0.35)-0.5);
+    vec2 displaced = uv + flow*(0.002+e*0.013)*(0.3+u_drift);
+    displaced += flow*gesture*(0.034 + kinetic*0.059);
+    if(u_mode>3.5) {
+      float row = floor(uv.y*118.0+t*1.7);
+      float breakup = step(0.960-0.040*e,hash21(vec2(row,floor(t*0.7)+u_seed)));
+      displaced.x += breakup*(noise2(vec2(row,t+u_seed))-0.5)*e*0.065;
     }
-    displaced = clamp(displaced, vec2(.001), vec2(.999));
+    displaced = clamp(displaced,vec2(0.001),vec2(0.999));
     vec3 c = src(displaced);
     float l = lum(c);
-    vec2 gStep = u_texel * (1.35 + 1.6*d);
-    float gx = lum(src(displaced+vec2(gStep.x,0.))) - lum(src(displaced-vec2(gStep.x,0.)));
-    float gy = lum(src(displaced+vec2(0.,gStep.y))) - lum(src(displaced-vec2(0.,gStep.y)));
-    float edge = sat(length(vec2(gx,gy)) * (3.4+5.2*d));
-    float outline = smoothstep(.13, .48, edge);
-    float organ = n*.74 + medium*.26;
-    vec3 outColor = c;
+    vec2 stepUV = u_texel*(1.35+1.6*d);
+    float gx = lum(src(displaced+vec2(stepUV.x,0.0))) - lum(src(displaced-vec2(stepUV.x,0.0)));
+    float gy = lum(src(displaced+vec2(0.0,stepUV.y))) - lum(src(displaced-vec2(0.0,stepUV.y)));
+    float edge = sat(length(vec2(gx,gy))*(3.4+5.2*d));
+    float outline = smoothstep(0.13,0.48,edge);
+    float organ = n*0.74+medium*0.26;
+    vec3 color = c;
 
-    if (u_mode < .5) {
-      // UNDER: 色層のトポロジーを形成し、暗部を洞穴にする。
-      float stratum = l + (organ-.48)*(.18+.35*e) + (micro-.5)*(.055*e);
-      float a = smoothstep(.15-.06*d,.43-.06*d,stratum);
-      float b = smoothstep(.44-.04*d,.70-.04*d,stratum);
-      float ctop = smoothstep(.63-.05*d,.84-.03*d,stratum+medium*.09);
-      vec3 ink = vec3(.015,.004,.036);
-      vec3 purple = vec3(.21,.026,.46);
-      vec3 flesh = vec3(.79,.53,.69);
-      vec3 acid = vec3(.52,.60,.026);
-      outColor = mix(ink, purple, a);
-      outColor = mix(outColor, flesh, b);
-      float acidVeins = ctop * (smoothstep(.3,.75,medium) * .65 + outline * .32);
-      outColor = mix(outColor, acid, sat(acidVeins)*.92);
-      outColor = mix(outColor, vec3(.008,.006,.012), outline*(.72+.18*d));
-      outColor += (micro-.5)*(.09*e);
+    if (u_mode<0.5) {
+      // UNDER: strata slowly shear, split and remember touches.
+      float shear = noise2(uv*vec2(3.1,6.9)+vec2(t*0.075,u_seed*0.23));
+      float fault = smoothstep(0.43,0.69,shear+outline*0.08);
+      float stratum = l + (organ-0.48)*(0.18+0.38*e)
+                    + (fault-0.5)*e*0.25 + (micro-0.5)*e*0.05;
+      stratum += gesture*(0.14+0.20*e)*(0.5+fault*0.5);
+      float a = smoothstep(0.15-0.06*d,0.43-0.06*d,stratum);
+      float b = smoothstep(0.44-0.04*d,0.70-0.04*d,stratum);
+      float top = smoothstep(0.63-0.05*d,0.84-0.03*d,stratum+medium*0.09);
+      vec3 ink = vec3(0.015,0.004,0.036);
+      vec3 purple = vec3(0.21,0.026,0.46);
+      vec3 flesh = vec3(0.79,0.53,0.69);
+      vec3 acid = vec3(0.52,0.60,0.026);
+      color = mix(ink,purple,a);
+      color = mix(color,flesh,b);
+      float vein = top*(smoothstep(0.3,0.75,medium)*0.65+outline*0.32);
+      color = mix(color,acid,sat(vein)*0.92);
+      color = mix(color,vec3(0.008,0.006,0.012),outline*(0.72+0.18*d));
+      color += (micro-0.5)*(0.08*e);
+      if(u_historyMix>0.5) {
+        vec3 remnant = past(uv+flow*(0.003+0.012*e));
+        color = mix(color,remnant,(0.35+0.30*d)*u_memory);
+      }
+    } else if (u_mode<1.5) {
+      // NEGATIVE: a moving latent exposure appears within the inverted image.
+      vec3 neg = pow(sat3(1.0-c),vec3(0.8+0.22*d));
+      color = mix(neg,vec3(0.89,0.92,0.95),0.12+e*0.18);
+      float warmth = smoothstep(0.2,0.63,l)*(1.0-smoothstep(0.63,0.95,l));
+      color = mix(color,vec3(0.44,0.26,0.34),warmth*(0.24+0.4*d));
+      float exposureLevel = 0.36 + 0.19*noise2(vec2(t*0.13+u_seed,3.7));
+      float latent = (1.0-smoothstep(0.045,0.20,abs(l-exposureLevel)));
+      latent *= smoothstep(0.31,0.76,organ)*(.22+.43*e);
+      color = mix(color,vec3(0.95,0.94,0.84),latent);
+      vec2 fringe = vec2(gx,gy)*u_texel*(6.0+15.0*e);
+      float cyanRim = outline*(0.45+0.4*e);
+      color = mix(color,vec3(0.012,0.62,0.82),cyanRim);
+      color.r += (src(displaced+fringe).r-c.r)*0.26*e;
+      color.b += (src(displaced-fringe).b-c.b)*0.22*e;
+      color = mix(color,vec3(0.25,0.20,0.40),(micro-0.53)*e*0.16);
+      color = mix(color,vec3(0.88,0.96,0.98),gesture*(0.22+0.22*d));
+    } else if (u_mode<2.5) {
+      // RELIEF: the imaginary grazing light drifts around the source relief.
+      float angle = t*0.19+u_seed*0.07;
+      vec3 lightDirection = normalize(vec3(-0.72*cos(angle)-0.22,
+                                            0.52*sin(angle*0.79+0.6)+0.22,0.7));
+      vec3 normal = normalize(vec3(-gx*(4.0+d*9.0),-gy*(4.0+d*9.0),0.35+0.15*(1.0-d)));
+      float light = sat(dot(normal,lightDirection)*0.63+0.32);
+      float elevation = l+(organ-0.5)*0.16*e + gesture*(0.15+0.15*e);
+      float bands = 10.0 + d*24.0;
+      float contour = 1.0-smoothstep(0.015,0.065,abs(fract(elevation*bands)-0.5));
+      vec3 chalk = mix(vec3(0.10,0.09,0.115),vec3(0.65,0.60,0.53),light);
+      chalk = mix(chalk,vec3(0.91,0.83,0.72),smoothstep(0.48,0.88,elevation)*0.6);
+      color = mix(chalk,vec3(0.045,0.046,0.055),contour*(0.25+0.48*e));
+      color = mix(color,vec3(0.03,0.03,0.04),outline*0.36);
+      color += (micro-0.5)*e*0.14;
+    } else if (u_mode<3.5) {
+      // SEEP: pigment pools at boundaries and slowly remembers local disturbances.
+      float liquid = l+(organ-0.52)*(0.45*e)-outline*0.17;
+      liquid += (noise2(field*0.55 + vec2(t*0.06,-t*0.035))-0.5)*e*0.22;
+      liquid -= gesture*(0.18+0.28*e);
+      float stain = smoothstep(0.24-0.12*d,0.52,liquid);
+      float crust = smoothstep(0.48,0.79,liquid+medium*0.17);
+      vec3 black = vec3(0.018,0.019,0.026);
+      vec3 lilac = vec3(0.44,0.24,0.68);
+      vec3 pallid = vec3(0.83,0.73,0.74);
+      color = mix(black,lilac,stain);
+      color = mix(color,pallid,crust);
+      float seep = smoothstep(0.55,0.83,organ+outline*0.24)*(1.0-smoothstep(0.85,1.0,l));
+      color = mix(color,vec3(0.68,0.72,0.065),seep*(0.28+0.65*e));
+      color *= (1.0-0.53*outline);
+      color += (micro-0.5)*0.12*e;
+      if(u_historyMix>0.5) {
+        vec3 residue = past(uv+flow*(0.004+0.019*e));
+        float pooling = (0.59+0.30*d)*u_memory*(0.82+0.18*outline);
+        color = mix(color,residue,pooling);
+      }
+    } else {
+      // GHOST: spatial splits and actual GPU-held frame history interfere.
+      vec2 shift = vec2(0.003+0.026*e,0.002+0.013*e);
+      shift *= vec2(sin(t*0.32+u_seed)*0.5+0.7,cos(t*0.3+u_seed)*0.5+0.7);
+      vec3 right = src(displaced+shift+flow*0.016);
+      vec3 left = src(displaced-shift*1.6);
+      vec3 ghost = vec3(right.r,c.g*0.55+right.b*0.28+left.g*0.17,left.b);
+      float corridor = fbm(uv*vec2(20.0,8.0)+vec2(-t*0.33,u_seed));
+      color = mix(ghost,vec3(0.035,0.04,0.055),0.22+0.21*d);
+      color += vec3(0.20,0.04,0.33)*outline*(0.18+0.42*e);
+      color += vec3(0.01,0.14,0.15)*(corridor-0.48)*e*0.55;
+      color += (micro-0.5)*e*0.065;
+      color += vec3(0.18,0.06,0.28)*gesture*(0.35+0.5*e);
+      if(u_historyMix>0.5) {
+        vec2 pastUv = uv+flow*(0.003+e*0.018)+vec2(sin(t*0.6),cos(t*0.41))*0.0025;
+        vec3 residual = past(pastUv);
+        color = mix(color,residual,(0.76+0.19*d)*u_memory);
+      }
     }
-    else if (u_mode < 1.5) {
-      // NEGATIVE: 高キーのネガに温かい肉色と青い電位境界を重ねる。
-      vec3 neg = pow(sat3(1.0 - c), vec3(.8+.22*d));
-      outColor = mix(neg, vec3(.89,.92,.95), .12 + e*.18);
-      float warmth = smoothstep(.2,.63,l) * (1.0-smoothstep(.63,.95,l));
-      outColor = mix(outColor, vec3(.44,.26,.34), warmth*(.24+.40*d));
-      float cyanRim = outline * (.45+.4*e);
-      outColor = mix(outColor, vec3(.012,.62,.82), cyanRim);
-      outColor = mix(outColor, vec3(.25,.20,.40), (micro-.53)*e*.16);
-    }
-    else if (u_mode < 2.5) {
-      // RELIEF: 元画像の明度を高さ場として解釈。勾配から仮想法線を導出。
-      vec3 normal = normalize(vec3(-gx*(4.+d*9.), -gy*(4.+d*9.), .35+ .15*(1.-d)));
-      vec3 sun = normalize(vec3(-.72,.52,.7));
-      float light = sat(dot(normal,sun)*.63+.32);
-      float elevation = l + (organ-.5)*.16*e;
-      float contour = 1.0-smoothstep(.015,.065,abs(fract(elevation*(10.+d*24.))-.5));
-      vec3 chalk = mix(vec3(.10,.09,.115),vec3(.65,.60,.53),light);
-      chalk = mix(chalk, vec3(.91,.83,.72), smoothstep(.48,.88,elevation)*.6);
-      outColor = mix(chalk,vec3(.045,.046,.055), contour * (.25+.48*e));
-      outColor = mix(outColor,vec3(.03,.03,.04),outline*.36);
-      outColor += (micro-.5)*e*.14;
-    }
-    else if (u_mode < 3.5) {
-      // SEEP: ハイライトで漂白、境界で色素沈着、陰に膜状の暗い空洞。
-      float liquid = l + (organ-.52)*(.45*e) - outline*.17;
-      float stain = smoothstep(.24-.12*d,.52,liquid);
-      float crust = smoothstep(.48,.79,liquid + medium*.17);
-      vec3 black = vec3(.018,.019,.026);
-      vec3 lilac = vec3(.44,.24,.68);
-      vec3 pallid = vec3(.83,.73,.74);
-      outColor = mix(black,lilac,stain);
-      outColor = mix(outColor,pallid,crust);
-      float seep = smoothstep(.55,.83,organ+outline*.24) * (1.0-smoothstep(.85,1.0,l));
-      outColor = mix(outColor,vec3(.68,.72,.065),seep*(.28+.65*e));
-      outColor *= (1.0-.53*outline);
-      outColor += (micro-.5)*.12*e;
-    }
-    else {
-      // GHOST: 異なる方向にずれた輪郭を再合成し、時間のずれを疑似生成。
-      vec2 shift = vec2(.003 + .026*e, .002 + .013*e);
-      shift *= vec2(sin(t*.32+u_seed)*.5+.7, cos(t*.3+u_seed)*.5+.7);
-      vec3 right = src(displaced + shift + flow*.016);
-      vec3 left = src(displaced - shift*1.6);
-      vec3 ghost = vec3(right.r, c.g*.55 + right.b*.28 + left.g*.17, left.b);
-      float corridor = fbm(uv*vec2(20.,8.)+vec2(-t*.33,u_seed));
-      outColor = mix(ghost, vec3(.035,.04,.055), .22+.21*d);
-      outColor += vec3(.20,.04,.33)*outline*(.18+.42*e);
-      outColor += vec3(.01,.14,.15)*(corridor-.48)*e*.55;
-      outColor += (micro-.5)*e*.065;
-      // 現在の映像に「実際の過去フレーム」を低解像度フィードバック。
-      // 履歴の更新は別の小さなFBOで行うため、入力が4KでもGPUメモリを節約できる。
-      vec2 pastUv = clamp(uv + flow*(.003 + e*.018) + vec2(sin(t*.6),cos(t*.41))*.0025,
-                          vec2(.001), vec2(.999));
-      vec3 residual = texture2D(u_history, pastUv).rgb;
-      float persistence = (.21 + .45*d) * u_historyMix;
-      outColor = mix(outColor, residual, persistence);
-    }
-
-    // タッチ時だけ表面の下から輪郭が現れる。静止画でも動画でも共通。
-    outColor = mix(outColor,
-      mix(outColor, vec3(.95,.89,.72), sat(outline + .13)) + vec3(.07,.02,.11),
-      probe * (.26+.44*d));
-    outColor = sat3(outColor);
-    gl_FragColor = vec4(outColor, 1.0);
+    gl_FragColor = vec4(sat3(color),1.0);
   }
 `;
 
@@ -320,7 +334,6 @@ function initGL() {
   gl.useProgram(program);
   buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  // X/Yはクリップ空間、U/Vは左下=(0,0)、右上=(1,1)。
   gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([
     -1,-1,0,0, 1,-1,1,0, -1,1,0,1,
     -1,1,0,1, 1,-1,1,0, 1,1,1,1
@@ -342,8 +355,8 @@ function initGL() {
     new Uint8Array([0,0,0,255]));
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
   u = {};
-  for (const name of ['u_source','u_history','u_historyMix',
-      'u_texel','u_resolution','u_pointer','u_touch',
+  for (const name of ['u_source','u_history','u_historyMix','u_memory',
+      'u_texel','u_resolution','u_pointer','u_touch','u_kinetic',
       'u_time','u_seed','u_mode','u_depth','u_erosion','u_drift']) {
     u[name] = gl.getUniformLocation(program,name);
   }
@@ -351,10 +364,8 @@ function initGL() {
   gl.uniform1i(u.u_history,1);
   sourceCanvas = document.createElement('canvas');
   sourceCtx = sourceCanvas.getContext('2d',{alpha:false});
-  if (!sourceCtx) throw new Error('画像縮小用Canvas 2Dを作成できません。');
+  if (!sourceCtx) throw new Error('2D SOURCE CANVAS UNAVAILABLE');
 }
-
-// 入力のサイズが変わるときだけGPUメモリを確保し、通常フレームはsubImageで更新する。
 function allocateSourceTexture(w, h) {
   state.sourceW = w;
   state.sourceH = h;
@@ -397,7 +408,6 @@ function resetFeedback() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 function initFeedback() {
-  // GPU内の2枚の小さなテクスチャを交互に更新。CPUへの読み戻しは行わない。
   for (const tex of feedbackTextures) gl.deleteTexture(tex);
   if (feedbackFramebuffer) gl.deleteFramebuffer(feedbackFramebuffer);
   feedbackTextures = [];
@@ -430,11 +440,13 @@ function drawPass(targetFramebuffer, w, h, now) {
   gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,feedbackTextures[feedbackReadIndex]);
   gl.uniform1i(u.u_source,0);
   gl.uniform1i(u.u_history,1);
-  gl.uniform1f(u.u_historyMix, state.mode===4 && state.historyReady ? 1 : 0);
+  gl.uniform1f(u.u_historyMix, state.historyReady && (state.mode===0 || state.mode===3 || state.mode===4) ? 1 : 0);
+  gl.uniform1f(u.u_memory, state.memoryFactor || 1);
   gl.uniform2f(u.u_texel,1/state.sourceW,1/state.sourceH);
   gl.uniform2f(u.u_resolution,w,h);
   gl.uniform2f(u.u_pointer,state.pointer[0],state.pointer[1]);
   gl.uniform1f(u.u_touch,state.touchForce);
+  gl.uniform1f(u.u_kinetic,state.kinetic);
   gl.uniform1f(u.u_time,now);
   gl.uniform1f(u.u_seed,state.seed);
   gl.uniform1f(u.u_mode,state.mode);
@@ -445,9 +457,12 @@ function drawPass(targetFramebuffer, w, h, now) {
 }
 function renderFrame(now, updateHistory=true) {
   if (!state.imageReady || !feedbackTextures.length) return;
-  // 常時表示は小さなキャンバスだけ。GHOST以外は1回のドローコール。
+  // Frame-rate independent memory retention; no CPU readback.
+  const elapsed = state.lastRenderTime > 0 ? Math.max(1/60, Math.min(0.15, now-state.lastRenderTime)) : 1/24;
+  state.lastRenderTime = now;
+  state.memoryFactor = Math.pow(0.98, elapsed*24);
   drawPass(null, canvas.width, canvas.height, now);
-  if (state.mode===4 && updateHistory) {
+  if ((state.mode===0 || state.mode===3 || state.mode===4) && updateHistory) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, feedbackFramebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,
       feedbackTextures[1-feedbackReadIndex],0);
@@ -462,15 +477,13 @@ function setRenderSize(w,h,clearHistory=false) {
   if (!canvas || !gl) return;
   if (canvas.width!==w || canvas.height!==h) {
     resizeCanvas(w,h,true);
-    // p5.jsが内部的にframebufferを変更することがあるため再設定する。
     state.renderW=w;state.renderH=h;
-    initFeedback();
+    if (clearHistory) initFeedback();
   } else if(clearHistory) resetFeedback();
   resizePreview();
 }
 function setSourceDimensions(w,h) {
   state.originalW=w;state.originalH=h;
-  // 静止画は読み込み時だけ縮小。動画はプレビューと記録で入力縮小サイズを変える。
   const [sw,sh]=state.type==='photo' ? sizeForLimit(w,h,MAX_PHOTO_SOURCE) : previewSize();
   allocateSourceTexture(sw,sh);
   const [pw,ph]=previewSize();
@@ -493,7 +506,7 @@ function changeQuality(q) {
     $('dimensionsTag').textContent=`${w} × ${h} · GPU`;
     if(state.type==='photo')state.frameDirty=true;
   }
-  setStatus(`GPU ${q.toUpperCase()} · プレビュー長辺 ${PERFORMANCE[q].preview}px · 保存時は高解像度`);
+  setStatus(`QUALITY / ${q.toUpperCase()}`);
 }
 
 function resizePreview() {
@@ -508,31 +521,32 @@ function clearPreviousSource() {
   const video=$('sourceVideo');
   video.pause(); video.onended=null; video.removeAttribute('src'); video.load();
   if (state.objectUrl) {URL.revokeObjectURL(state.objectUrl); state.objectUrl=null;}
+  state.sourceGeneration++;
   state.type='none'; state.element=null; state.frameDirty=false; state.imageReady=false;
   resetFeedback();
   state.videoReady=false; state.renderingError=false;
   state.frameTime=-1; state.touchForce=0; state.touchTarget=0;
+  state.kinetic=0; state.kineticTarget=0; state.pointerIsDown=false; state.lastRenderTime=0;
   clearExport();
 }
 async function openFile(file) {
   if (!file || state.isRecording) return;
-  if (!gl || !sourceCtx || !program) {setStatus('この端末ではWebGLを利用できません。',true);return;}
+  if (!gl || !sourceCtx || !program) {setStatus('WEBGL UNAVAILABLE',true);return;}
   const isVideo = file.type.startsWith('video/') || /\.(mov|mp4|m4v|webm)$/i.test(file.name);
   const isImage = file.type.startsWith('image/') || /\.(heic|heif|png|jpeg|jpg|webp)$/i.test(file.name);
-  if (!isVideo && !isImage) {setStatus('画像または動画を選択してください。',true);return;}
+  if (!isVideo && !isImage) {setStatus('UNSUPPORTED FILE',true);return;}
   clearPreviousSource();
   state.type=isVideo?'video':'photo'; state.fileName=file.name;
   state.objectUrl=URL.createObjectURL(file);
   $('assetName').textContent=file.name;
   $('sourceTag').textContent=isVideo?'VIDEO INPUT':'STILL INPUT';
   $('emptyState').hidden=true;
-  // emptyStateはCSSがdisplay:flexを定義するので明示的に隠す。
   $('emptyState').style.display='none';
   $('stage').classList.add('has-source');
   $('saveButton').disabled=true;
   $('playButton').disabled=true;
   $('recordButton').disabled=true;
-  setStatus('メディアを読み込んでいます…');
+  setStatus('LOADING');
   try {
     if (isVideo) {
       const video=$('sourceVideo');
@@ -541,16 +555,17 @@ async function openFile(file) {
       video.src=state.objectUrl;
       video.load();
       await new Promise((resolve,reject)=>{
-        const timeout=setTimeout(()=>reject(new Error('動画の読み込みがタイムアウトしました。')),18000);
+        const timeout=setTimeout(()=>reject(new Error('VIDEO LOAD TIMEOUT')),18000);
         video.addEventListener('loadedmetadata',()=>{clearTimeout(timeout);resolve();},{once:true});
-        video.addEventListener('error',()=>{clearTimeout(timeout);reject(new Error('この動画形式を再生できません。'));},{once:true});
+        video.addEventListener('error',()=>{clearTimeout(timeout);reject(new Error('VIDEO DECODE FAILED'));},{once:true});
       });
       setSourceDimensions(video.videoWidth,video.videoHeight);
       state.imageReady=true; state.videoReady=true; state.frameDirty=true;
       video.ontimeupdate=()=>{state.frameDirty=true;};
       if (typeof video.requestVideoFrameCallback === 'function') {
+        const generation=state.sourceGeneration;
         const onVideoFrame=()=>{
-          if(state.element!==video || state.type!=='video')return;
+          if(state.sourceGeneration!==generation || state.type!=='video')return;
           state.frameDirty=true;
           video.requestVideoFrameCallback(onVideoFrame);
         };
@@ -562,27 +577,25 @@ async function openFile(file) {
       $('recordButton').disabled=false;
       $('saveButton').disabled=false;
       $('playLabel').textContent='PAUSE'; $('playIcon').textContent='Ⅱ';
-      // 読み込み自体がファイル選択の操作に続いており、ミュート動画の再生は通常許可される。
       let started = true;
       try {await video.play();} catch {
         started = false;
         $('playLabel').textContent='PLAY'; $('playIcon').textContent='▶';
       }
-      setStatus(started ? `VIDEO READY · ${secondsToClock(video.duration)} · 保存は無音 / 最大45秒`
-        : '動画を読み込みました。PLAYを押して再生してください。');
+      setStatus(started ? 'VIDEO READY' : 'READY / PRESS PLAY');
     } else {
       const img=new Image();
       state.element=img;
       await new Promise((resolve,reject)=>{
         img.onload=resolve;
-        img.onerror=()=>reject(new Error('この画像を開けません。形式を確認してください。'));
+        img.onerror=()=>reject(new Error('IMAGE DECODE FAILED'));
         img.src=state.objectUrl;
       });
       setSourceDimensions(img.naturalWidth,img.naturalHeight);
       state.imageReady=true; state.frameDirty=true;
       $('timecode').textContent='STILL';
       $('saveButton').disabled=false;
-      setStatus('IMAGE READY · 画面を指でなぞると局所的に変化します。');
+      setStatus('IMAGE READY');
     }
   } catch (error) {
     setStatus(error.message,true);
@@ -608,14 +621,14 @@ function togglePlay() {
   if (state.isRecording) {stopRecording();return;}
   if (v.paused) {
     v.play().then(()=>{$('playLabel').textContent='PAUSE';$('playIcon').textContent='Ⅱ';})
-      .catch(err=>setStatus(`再生できません: ${err.message}`,true));
+      .catch(err=>setStatus(`PLAYBACK FAILED: ${err.message}`,true));
   } else {
     v.pause();
     $('playLabel').textContent='PLAY';$('playIcon').textContent='▶';
   }
 }
 function toBlobAsync(c,type,quality) {
-  return new Promise((resolve,reject)=>c.toBlob(b=>b?resolve(b):reject(new Error('画像の書き出しに失敗しました。')),type,quality));
+  return new Promise((resolve,reject)=>c.toBlob(b=>b?resolve(b):reject(new Error('IMAGE ENCODE FAILED')),type,quality));
 }
 function safeBaseName(name) {
   return (name||'capture').replace(/\.[^.]+$/,'').replace(/[^a-zA-Z0-9ぁ-んァ-ン一-龥_\-]/g,'_').slice(0,55);
@@ -648,18 +661,16 @@ async function saveStill() {
       renderFrame(performance.now()*.001,false);
       const blob=await toBlobAsync(canvas,'image/png');
       const name=`hidden_${safeBaseName(state.fileName)}_m${state.mode+1}.png`;
-      // 共有画面の表示中に高解像度描画を続けないよう、先にプレビューへ戻す。
       setRenderSize(...originalSize);
       await shareOrSave(blob,name,true);
       setStatus(`IMAGE EXPORTED · ${exportW} × ${exportH}`);
     } finally {
       if(canvas.width!==originalSize[0] || canvas.height!==originalSize[1]) setRenderSize(...originalSize);
     }
-  } catch(error) {setStatus(`保存エラー: ${error.message}`,true);console.error(error);}
+  } catch(error) {setStatus(`EXPORT FAILED: ${error.message}`,true);console.error(error);}
 }
 function pickMimeType() {
   if (typeof MediaRecorder==='undefined') return null;
-  // iPhoneはMP4優先。非対応環境ではWebMを選択し、拡張子も合わせる。
   const types=['video/mp4;codecs=avc1.42E01E','video/mp4;codecs=avc1.424028',
     'video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
   return types.find(t=>MediaRecorder.isTypeSupported(t)) || '';
@@ -667,7 +678,7 @@ function pickMimeType() {
 async function startRecording() {
   if (state.type!=='video'||!state.videoReady||state.isRecording) return;
   if (typeof canvas.captureStream!=='function'||typeof MediaRecorder==='undefined') {
-    setStatus('このブラウザでは動画の録画APIが使えません。',true);return;
+    setStatus('RECORDING NOT SUPPORTED',true);return;
   }
   clearExport();
   let stream;
@@ -675,7 +686,6 @@ async function startRecording() {
     const v=state.element;
     v.pause();v.loop=false;
     v.currentTime=0;
-    // 先頭フレームへのシーク後に録画を開始する。
     if (v.seeking) await new Promise(resolve=>{
       const timeout=setTimeout(resolve,2000);
       v.addEventListener('seeked',()=>{clearTimeout(timeout);resolve();},{once:true});
@@ -698,7 +708,7 @@ async function startRecording() {
     const chunks=[];
     state.stream=stream;state.recorder=recorder;
     recorder.ondataavailable=(event)=>{if(event.data&&event.data.size)chunks.push(event.data);};
-    recorder.onerror=event=>{setStatus(`録画エラー: ${event.error?.message||'不明なエラー'}`,true);stopRecording();};
+    recorder.onerror=event=>{setStatus(`RECORD FAILED: ${event.error?.message||'UNKNOWN'}`,true);stopRecording();};
     recorder.onstop=()=>{
       stream.getTracks().forEach(track=>track.stop());
       state.isRecording=false;state.recorder=null;state.stream=null;
@@ -711,25 +721,24 @@ async function startRecording() {
         setRenderSize(pw,ph,true);
         $('dimensionsTag').textContent=`${pw} × ${ph} · GPU`;
       }
-      if(chunks.length===0){setStatus('映像データが作成されませんでした。',true);return;}
+      if(chunks.length===0){setStatus('NO VIDEO DATA',true);return;}
       const actualMime=recorder.mimeType || (mime||'video/mp4');
       const extension=/webm/i.test(actualMime)?'webm':'mp4';
       const blob=new Blob(chunks,{type:actualMime});
       state.recordedBlob=blob;
       state.recordedName=`hidden_${safeBaseName(state.fileName)}_${Date.now()}.${extension}`;
-      $('exportDetails').textContent=`${secondsToClock(Math.min(v.currentTime,MAX_RECORD_SECONDS))} / ${recordW} × ${recordH} / ${extension.toUpperCase()} / 無音 / ${(blob.size/1048576).toFixed(1)} MB`;
+      $('exportDetails').textContent=`${secondsToClock(Math.min(v.currentTime,MAX_RECORD_SECONDS))} / ${recordW} × ${recordH} / ${extension.toUpperCase()} / SILENT / ${(blob.size/1048576).toFixed(1)} MB`;
       $('exportPanel').hidden=false;
       $('shareVideo').disabled=!(navigator.share && navigator.canShare && navigator.canShare({files:[new File([blob],state.recordedName,{type:blob.type})]}));
-      setStatus('VIDEO READY · 「共有」または「ファイル保存」を選択してください。');
+      setStatus('VIDEO READY');
     };
     recorder.start(500);
     state.isRecording=true;state.recordStartedAt=performance.now();
     document.body.classList.add('is-recording');
     $('recordLabel').textContent='STOP';$('recState').textContent='● REC 00:00';
-    // プレビューがすでに開始済みである場合も、必ず先頭から再生する。
     await v.play();
     $('playLabel').textContent='PAUSE';$('playIcon').textContent='Ⅱ';
-    setStatus('RECORDING · 動画を実時間で処理中。上限45秒 / 無音');
+    setStatus('RECORDING / MAX 45S / SILENT');
   } catch(error) {
     if(state.recorder && state.recorder.state!=='inactive')state.recorder.stop();
     else if(stream)stream.getTracks().forEach(track=>track.stop());
@@ -741,7 +750,7 @@ async function startRecording() {
     }
     document.body.classList.remove('is-recording');
     $('recordLabel').textContent='RECORD';$('recState').textContent='';
-    setStatus(`録画を開始できません: ${error.message}`,true);
+    setStatus(`RECORD FAILED: ${error.message}`,true);
     console.error(error);
   }
 }
@@ -756,7 +765,6 @@ function clearExport() {state.recordedBlob=null;state.recordedName='';$('exportP
 function setMode(mode) {
   if (state.mode!==mode) resetFeedback();
   state.mode=mode;
-  $('modeDescription').textContent=MODES[mode];
   $('modeIndex').textContent=String(mode+1).padStart(2,'0')+' / 05';
   document.querySelectorAll('.mode-button').forEach(b=>{
     const active=Number(b.dataset.mode)===mode;
@@ -777,7 +785,7 @@ function bindEvents() {
     button.addEventListener('click',()=>setMode(Number(button.dataset.mode)));
   });
   $('reroll').addEventListener('click',()=>{
-    state.seed=Math.random()*120+1;resetFeedback();setStatus('MATERIAL PATTERN RESEEDED');
+    state.seed=Math.random()*120+1;resetFeedback();state.lastRenderTime=0;setStatus('RESEEDED');
   });
   $('renderQuality').addEventListener('change',e=>changeQuality(e.target.value));
   $('importButton').addEventListener('click',()=>{if(!state.isRecording)$('fileInput').click();});
@@ -802,14 +810,14 @@ function bindEvents() {
   });
   $('canvas-host').addEventListener('pointerdown',event=>{
     if(!state.imageReady)return;
-    updateTouch(event);state.touchTarget=1;
+    state.pointerIsDown=true;state.pointerTime=0;updateTouch(event);state.touchTarget=1;
     if(event.target===canvas) canvas.setPointerCapture(event.pointerId);
   });
   $('canvas-host').addEventListener('pointermove',event=>{
-    if(state.touchTarget>0)updateTouch(event);
+    if(state.pointerIsDown)updateTouch(event);
   });
   ['pointerup','pointercancel','pointerleave'].forEach(type=>{
-    $('canvas-host').addEventListener(type,()=>{state.touchTarget=0;});
+    $('canvas-host').addEventListener(type,()=>{state.touchTarget=0;state.pointerIsDown=false;state.kineticTarget=0;});
   });
   $('stage').addEventListener('dragover',event=>event.preventDefault());
   $('stage').addEventListener('drop',event=>{
@@ -831,10 +839,19 @@ function bindEvents() {
 }
 function updateTouch(event) {
   const rect=canvas.getBoundingClientRect();
-  state.pointer=[
+  if (rect.width<=0 || rect.height<=0) return;
+  const point=[
     Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)),
     Math.max(0,Math.min(1,1-(event.clientY-rect.top)/rect.height))
   ];
+  const now=performance.now();
+  if(state.pointerTime>0) {
+    const dt=Math.max(0.012,(now-state.pointerTime)/1000);
+    const travel=Math.hypot((point[0]-state.pointer[0])*rect.width/rect.height,point[1]-state.pointer[1]);
+    state.kineticTarget=Math.min(1,travel/dt*0.32);
+  }
+  state.pointer=point;
+  state.pointerTime=now;
 }
 
 document.addEventListener('DOMContentLoaded',()=>{
