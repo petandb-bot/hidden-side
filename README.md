@@ -1,49 +1,28 @@
-# HIDDEN SIDE v0.3 — image excavator
+# HIDDEN SIDE v0.3.1
 
-WebGL1 / GLSL ES 1.00 / p5.js 1.11.13. 写真や動画に対して、輪郭・明度・局所変化・時間的残滓を利用した処理をリアルタイムに適用するWebアプリです。
+GPU image excavator for photographs and moving images.
 
-## v0.3 の発展
+## Recording
 
-- **UNDER**: 色層がゆっくり移動・断裂する。タッチによる層の露出はGPUの短い履歴に残ります。
-- **NEGATIVE**: ネガ反転像の内部に潜像のような露光域が移動する。青い境界と微弱な色ずれを維持。
-- **RELIEF**: 画像の明度勾配から仮想法線を計算。光の向きが時間とともに変化するため、静止画でも陰影が動きます。
-- **SEEP**: 色素沈着や液状の境界がゆっくり移動。触った場所の変化を低解像度のGPU履歴へ蓄積。
-- **GHOST**: 空間的なズレに加え、過去の加工結果をGPUに保持。低速な尾を引くフィードバック。
-- **TOUCH**: タッチ位置だけでなく指の移動速度を変形強度に反映。各モードで異なる反応。
-- **UI**: 日本語の補足、長いモード説明、キャンバスのヒントを削除。5モード＋DEPTH / EROSION / DRIFTの操作は維持。
-- **SAVE IMAGE**: 一時的な高解像度キャンバスへの切替時にGPU履歴を破棄しないよう変更。
-- **RESEED**: 生成パターンと過去フレームの痕跡をリセット。
+- **Photos**: RECORD captures the animated WebGL output as a silent video. Press STOP to finish, or recording stops automatically after 45 seconds.
+- **Videos**: RECORD captures the processed video from its beginning, up to 45 seconds or the end of the source. Audio is not included.
+- **Windows Chrome**: WebM/VP8 is preferred, with supported alternatives selected at runtime. **Safari**: MP4 is preferred when supported.
+- The browser encodes in real time with `HTMLCanvasElement.captureStream()` and `MediaRecorder`. Output format, performance, and availability depend on the browser and GPU.
+- The record control remains disabled if no file is loaded or recording APIs are unavailable. SAVE IMAGE exports a PNG in either input mode.
 
-## 動作方法
+## Processing
 
-1. `index.html`, `app.js`, `style.css`, `manifest.webmanifest`, `sw.js` とアイコンを同じフォルダに置き、GitHub PagesなどのHTTPS静的ホストで公開。
-2. iPhoneのSafariで開く。共有メニューから「ホーム画面に追加」でアプリとして使用可能。
-3. IMPORTで写真または動画を選択し、5モードから加工を選択。DRIFTを0にすると自動的な時間変化は停止します（動画入力そのものの変化は続きます）。
-4. SAVE IMAGEで写真・動画の現在フレームをPNGとして保存。動画はRECORDで先頭から最大45秒間リアルタイム録画。
-5. 更新後に旧画面が残る場合、Safariを再読み込みするか一度Webアプリを完全終了して開き直してください（Service Workerのキャッシュが更新されるまで旧ファイルが出ることがあります）。
+Five modes remain: UNDER, NEGATIVE, RELIEF, SEEP, GHOST. Touch interaction, feedback textures, and DEPTH / EROSION / DRIFT are unchanged. The interface has been simplified to restrained typography, minimal boundaries, and a quieter action area.
 
-## 負荷設定
+## Runtime
 
-| QUALITY | プレビュー長辺上限 | 動画録画長辺上限 | 指定fps |
-| --- | ---: | ---: | ---: |
-| ECO | 520px | 720px | 24 |
-| BALANCED | 720px | 960px | 24 |
-| FINE | 960px | 1280px | 30 |
+- WebGL1 / GLSL ES 1.00, p5.js **1.11.13**.
+- Load `index.html` via GitHub Pages or another HTTPS static host. For local tests on Windows, an HTTP development server is recommended.
+- QUALITY adjusts preview resolution and recording resolution. Recording uses 24 fps (ECO/BALANCED) or 30 fps (FINE). A browser may encode fewer frames under load.
+- GPU history uses two small reusable textures. The app does not upload user-selected media.
+- The first launch requires a connection to load p5.js from the CDN.
+- The new service worker cache is versioned. If an old installed version persists, fully reload the app or clear the site's cached data.
 
-- 写真のPNG保存は最大2048px。動画像は録画開始時のみ入力テクスチャを録画解像度に切替。
-- 過去フレームはGPU上の最大長辺448pxの2枚のFBOテクスチャを再利用。UNDER / SEEP / GHOSTで履歴を更新し、NEGATIVE / RELIEFでは1パス描画。
-- CPU側の画像処理を抑える一方、WebGLのテクスチャアップロードと動画デコードには負荷がかかります。重い場合はECOを使用してください。
+## Limits
 
-## 保存と制約
-
-- 動画保存はMediaRecorderによる**無音のリアルタイム録画**。MP4優先、対応しない環境ではWebM。ブラウザ・端末・コーデックで結果は変わります。
-- 元の動画の音声は引き継がず、確実なオフライン変換エンジンでもありません。
-- 写真や動画の入力は端末内で処理します。p5.js本体は初回ロード時にCDNから取得します。スタンドアロンHTML版も初回オンライン接続が必要です。
-- iPhoneでの録画動作、実fps、熱、メモリ上限は実機未検証です。
-
-## 検証
-
-- JavaScript構文チェックを実施。
-- ネイティブなMesa/OpenGL ES2ソフトウェアコンテキストで、GLSL ES 1.00の頂点シェーダー・フラグメントシェーダーを**コンパイル・リンク**し、5モードのピクセル出力（GLエラーなし）を確認。
-- デスクトップとiPhone相当の画面サイズでHTML/CSSのレイアウトを確認。
-- ブラウザのGPUコンテキストは検証環境の制限で取得できず、p5.js本体と連携した実動作・iOS Safariの実機動作は未検証。
+Recording remains silent, real time, and at most 45 seconds. 4K output, lossless video, audio preservation, and offline frame-accurate conversion are not supported.

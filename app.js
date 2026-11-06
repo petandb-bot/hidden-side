@@ -1,4 +1,4 @@
-/* HIDDEN SIDE v0.3 | p5.js 1.11.13 | WebGL1 | local GPU processing */
+/* HIDDEN SIDE v0.3.1 | p5.js 1.11.13 | WebGL1 | local GPU processing */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
@@ -20,8 +20,8 @@ const state = {
   w: 4, h: 4, originalW: 4, originalH: 4,
   renderW: 4, renderH: 4, sourceW: 0, sourceH: 0,
   quality: 'balanced', frameDirty: false, frameTime: -1, imageReady: false,
-  videoReady: false, isRecording: false, recorder: null, stream: null,
-  recordStartedAt: 0, recordedBlob: null, recordedName: '',
+  videoReady: false, isRecording: false, recordStarting: false, recorder: null, stream: null,
+  recordStartedAt: 0, recordDuration: 0, recordedBlob: null, recordedName: '',
   pointer: [0.5, 0.5], touchForce: 0, touchTarget: 0,
   kinetic: 0, kineticTarget: 0, pointerTime: 0, pointerIsDown: false,
   activeURL: null, firstDraw: true, renderingError: false,
@@ -105,6 +105,9 @@ function draw() {
       state.frameDirty = false;
     }
     renderFrame(now * 0.001);
+    if (state.isRecording && (now - state.recordStartedAt) >= MAX_RECORD_SECONDS * 1000) {
+      stopRecording();
+    }
   } catch (error) {
     if (state.type === 'video') state.frameDirty = true;
     if (!state.renderingError) {
@@ -496,7 +499,7 @@ function changeVideoSourceSize(w,h) {
   state.frameDirty=true;
 }
 function changeQuality(q) {
-  if (!PERFORMANCE[q] || state.isRecording) return;
+  if (!PERFORMANCE[q] || state.isRecording || state.recordStarting) return;
   state.quality=q;
   frameRate(PERFORMANCE[q].fps);
   if(state.imageReady){
@@ -530,7 +533,7 @@ function clearPreviousSource() {
   clearExport();
 }
 async function openFile(file) {
-  if (!file || state.isRecording) return;
+  if (!file || state.isRecording || state.recordStarting) return;
   if (!gl || !sourceCtx || !program) {setStatus('WEBGL UNAVAILABLE',true);return;}
   const isVideo = file.type.startsWith('video/') || /\.(mov|mp4|m4v|webm)$/i.test(file.name);
   const isImage = file.type.startsWith('image/') || /\.(heic|heif|png|jpeg|jpg|webp)$/i.test(file.name);
@@ -574,7 +577,7 @@ async function openFile(file) {
       video.onended=()=>{if(state.isRecording)stopRecording();};
       $('timecode').textContent=secondsToClock(0);
       $('playButton').disabled=false;
-      $('recordButton').disabled=false;
+      $('recordButton').disabled=!canRecord();
       $('saveButton').disabled=false;
       $('playLabel').textContent='PAUSE'; $('playIcon').textContent='Ⅱ';
       let started = true;
@@ -595,7 +598,8 @@ async function openFile(file) {
       state.imageReady=true; state.frameDirty=true;
       $('timecode').textContent='STILL';
       $('saveButton').disabled=false;
-      setStatus('IMAGE READY');
+      $('recordButton').disabled=!canRecord();
+      setStatus(canRecord() ? 'IMAGE READY' : 'IMAGE READY · RECORD UNSUPPORTED');
     }
   } catch (error) {
     setStatus(error.message,true);
@@ -616,7 +620,7 @@ function setStatus(message, error=false) {
   $('status').style.color=error?'#f6a69f':'#86847c';
 }
 function togglePlay() {
-  if (state.type!=='video'||!state.videoReady) return;
+  if (state.type!=='video'||!state.videoReady || state.recordStarting) return;
   const v=state.element;
   if (state.isRecording) {stopRecording();return;}
   if (v.paused) {
@@ -647,7 +651,7 @@ async function shareOrSave(blob,name,preferShare=true) {
   downloadBlob(blob,name);
 }
 async function saveStill() {
-  if (!state.imageReady) return;
+  if (!state.imageReady || state.isRecording || state.recordStarting) return;
   try {
     const originalSize=[canvas.width,canvas.height];
     const [exportW,exportH]=exportSize();
@@ -669,97 +673,189 @@ async function saveStill() {
     }
   } catch(error) {setStatus(`EXPORT FAILED: ${error.message}`,true);console.error(error);}
 }
+function canRecord() {
+  return !!canvas && typeof canvas.captureStream === 'function' &&
+    typeof MediaRecorder !== 'undefined';
+}
 function pickMimeType() {
-  if (typeof MediaRecorder==='undefined') return null;
-  const types=['video/mp4;codecs=avc1.42E01E','video/mp4;codecs=avc1.424028',
-    'video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'];
-  return types.find(t=>MediaRecorder.isTypeSupported(t)) || '';
+  if (typeof MediaRecorder === 'undefined') return '';
+  const apple = /iPhone|iPad|iPod|Macintosh/i.test(navigator.userAgent) &&
+    !/Chrome|CriOS|Edg/i.test(navigator.userAgent);
+  const webm = ['video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm'];
+  const mp4 = ['video/mp4;codecs=avc1.42E01E', 'video/mp4'];
+  const ordered = apple ? [...mp4, ...webm] : [...webm, ...mp4];
+  if (typeof MediaRecorder.isTypeSupported !== 'function') return '';
+  return ordered.find(mime => MediaRecorder.isTypeSupported(mime)) || '';
+}
+function syncRecordControls(busy = false) {
+  const locked = busy || state.isRecording || state.recordStarting;
+  $('recordButton').disabled = busy || !state.imageReady || !canRecord();
+  $('importButton').disabled = locked;
+  $('playButton').disabled = locked || state.type !== 'video' || !state.videoReady;
+  $('saveButton').disabled = locked || !state.imageReady;
+  $('renderQuality').disabled = locked;
 }
 async function startRecording() {
-  if (state.type!=='video'||!state.videoReady||state.isRecording) return;
-  if (typeof canvas.captureStream!=='function'||typeof MediaRecorder==='undefined') {
-    setStatus('RECORDING NOT SUPPORTED',true);return;
+  if (!state.imageReady || state.isRecording || state.recordStarting) return;
+  if (!canRecord()) {
+    setStatus('RECORD UNSUPPORTED IN THIS BROWSER', true);
+    return;
   }
+  state.recordStarting = true;
+  syncRecordControls(true);
   clearExport();
-  let stream;
+  let stream = null;
+  let started = false;
+  const videoInput = state.type === 'video';
+  const video = videoInput ? state.element : null;
   try {
-    const v=state.element;
-    v.pause();v.loop=false;
-    v.currentTime=0;
-    if (v.seeking) await new Promise(resolve=>{
-      const timeout=setTimeout(resolve,2000);
-      v.addEventListener('seeked',()=>{clearTimeout(timeout);resolve();},{once:true});
-    });
-    state.frameDirty=true;
-    const [recordW,recordH]=exportSize();
-    changeVideoSourceSize(recordW,recordH);
-    setRenderSize(recordW,recordH,true);
-    if (v.readyState>=2) {
-      sourceCtx.drawImage(v,0,0,state.sourceW,state.sourceH);
-      uploadSource();
-      state.frameDirty=false;
-      renderFrame(performance.now()*.001);
-    }
-    stream=canvas.captureStream(PERFORMANCE[state.quality].fps);
-    const mime=pickMimeType();
-    const opts={videoBitsPerSecond: Math.max(2000000,Math.min(7000000,recordW*recordH*5.0))};
-    if(mime)opts.mimeType=mime;
-    const recorder=new MediaRecorder(stream,opts);
-    const chunks=[];
-    state.stream=stream;state.recorder=recorder;
-    recorder.ondataavailable=(event)=>{if(event.data&&event.data.size)chunks.push(event.data);};
-    recorder.onerror=event=>{setStatus(`RECORD FAILED: ${event.error?.message||'UNKNOWN'}`,true);stopRecording();};
-    recorder.onstop=()=>{
-      stream.getTracks().forEach(track=>track.stop());
-      state.isRecording=false;state.recorder=null;state.stream=null;
-      document.body.classList.remove('is-recording');
-      $('recordLabel').textContent='RECORD'; $('recState').textContent='';
-      if(state.type==='video') {
-        state.element.loop=true;
-        const [pw,ph]=previewSize();
-        changeVideoSourceSize(pw,ph);
-        setRenderSize(pw,ph,true);
-        $('dimensionsTag').textContent=`${pw} × ${ph} · GPU`;
+    if (videoInput) {
+      if (!state.videoReady) throw new Error('VIDEO NOT READY');
+      video.pause();
+      video.loop = false;
+      if (video.currentTime > 0.01) {
+        video.currentTime = 0;
+        if (video.seeking) await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('VIDEO SEEK TIMEOUT')), 4000);
+          video.addEventListener('seeked', () => { clearTimeout(timeout); resolve(); }, { once:true });
+        });
       }
-      if(chunks.length===0){setStatus('NO VIDEO DATA',true);return;}
-      const actualMime=recorder.mimeType || (mime||'video/mp4');
-      const extension=/webm/i.test(actualMime)?'webm':'mp4';
-      const blob=new Blob(chunks,{type:actualMime});
-      state.recordedBlob=blob;
-      state.recordedName=`hidden_${safeBaseName(state.fileName)}_${Date.now()}.${extension}`;
-      $('exportDetails').textContent=`${secondsToClock(Math.min(v.currentTime,MAX_RECORD_SECONDS))} / ${recordW} × ${recordH} / ${extension.toUpperCase()} / SILENT / ${(blob.size/1048576).toFixed(1)} MB`;
-      $('exportPanel').hidden=false;
-      $('shareVideo').disabled=!(navigator.share && navigator.canShare && navigator.canShare({files:[new File([blob],state.recordedName,{type:blob.type})]}));
+    }
+    const [recordW, recordH] = sizeForLimit(
+      state.originalW, state.originalH, PERFORMANCE[state.quality].video
+    );
+    if (videoInput) changeVideoSourceSize(recordW, recordH);
+    setRenderSize(recordW, recordH, true);
+    sourceCtx.drawImage(state.element, 0, 0, state.sourceW, state.sourceH);
+    uploadSource();
+    state.frameDirty = false;
+    state.frameTime = videoInput ? video.currentTime : -1;
+    renderFrame(performance.now() * .001);
+
+    stream = canvas.captureStream(PERFORMANCE[state.quality].fps);
+    const mime = pickMimeType();
+    const options = {
+      videoBitsPerSecond: Math.max(1800000, Math.min(6000000, recordW * recordH * 4.5))
+    };
+    if (mime) options.mimeType = mime;
+    let recorder;
+    try {
+      recorder = new MediaRecorder(stream, options);
+    } catch (codecError) {
+      if (!mime) throw codecError;
+      recorder = new MediaRecorder(stream, { videoBitsPerSecond: options.videoBitsPerSecond });
+    }
+    const chunks = [];
+    state.stream = stream;
+    state.recorder = recorder;
+    recorder.ondataavailable = event => {
+      if (event.data && event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onerror = event => {
+      setStatus(`RECORD FAILED: ${event.error?.message || 'UNKNOWN'}`, true);
+      stopRecording();
+    };
+    recorder.onstop = () => {
+      stream.getTracks().forEach(track => track.stop());
+      const elapsed = Math.min(MAX_RECORD_SECONDS,
+        Math.max(0, (performance.now() - state.recordStartedAt) / 1000));
+      state.recordDuration = elapsed;
+      state.isRecording = false;
+      state.recordStarting = false;
+      state.recorder = null;
+      state.stream = null;
+      document.body.classList.remove('is-recording');
+      $('recordLabel').textContent = 'RECORD';
+      $('recState').textContent = '';
+      if (videoInput && state.type === 'video') {
+        video.loop = true;
+        $('playLabel').textContent = 'PLAY';
+        $('playIcon').textContent = '▶';
+        const [pw, ph] = previewSize();
+        changeVideoSourceSize(pw, ph);
+      }
+      if (state.imageReady) {
+        const [pw, ph] = previewSize();
+        setRenderSize(pw, ph, true);
+        state.frameDirty = true;
+        $('dimensionsTag').textContent = `${pw} × ${ph} · GPU`;
+      }
+      syncRecordControls(false);
+      if (!chunks.length) {
+        setStatus('NO VIDEO DATA', true);
+        return;
+      }
+      const actualMime = recorder.mimeType || mime || 'video/webm';
+      const extension = /mp4/i.test(actualMime) ? 'mp4' : 'webm';
+      const blob = new Blob(chunks, { type: actualMime });
+      state.recordedBlob = blob;
+      state.recordedName = `hidden_${safeBaseName(state.fileName)}_${Date.now()}.${extension}`;
+      $('exportDetails').textContent = `${secondsToClock(elapsed)} / ${recordW} × ${recordH} / ${extension.toUpperCase()} / SILENT / ${(blob.size / 1048576).toFixed(1)} MB`;
+      $('exportPanel').hidden = false;
+      try {
+        const file = new File([blob], state.recordedName, { type: blob.type });
+        $('shareVideo').disabled = !(navigator.share && navigator.canShare && navigator.canShare({ files: [file] }));
+      } catch (_) { $('shareVideo').disabled = true; }
       setStatus('VIDEO READY');
     };
-    recorder.start(500);
-    state.isRecording=true;state.recordStartedAt=performance.now();
+    recorder.start(300);
+    state.recordStartedAt = performance.now();
+    state.isRecording = true;
+    started = true;
     document.body.classList.add('is-recording');
-    $('recordLabel').textContent='STOP';$('recState').textContent='● REC 00:00';
-    await v.play();
-    $('playLabel').textContent='PAUSE';$('playIcon').textContent='Ⅱ';
-    setStatus('RECORDING / MAX 45S / SILENT');
-  } catch(error) {
-    if(state.recorder && state.recorder.state!=='inactive')state.recorder.stop();
-    else if(stream)stream.getTracks().forEach(track=>track.stop());
-    state.isRecording=false;
-    if(state.type==='video') {
-      const [pw,ph]=previewSize();
-      changeVideoSourceSize(pw,ph);
-      setRenderSize(pw,ph,true);
+    $('recordLabel').textContent = 'STOP';
+    $('recState').textContent = '● REC 00:00';
+    syncRecordControls(false);
+    if (videoInput) {
+      try {
+        await video.play();
+        $('playLabel').textContent = 'PAUSE';
+        $('playIcon').textContent = 'Ⅱ';
+      } catch (playError) {
+        stopRecording();
+        throw new Error(`VIDEO PLAYBACK FAILED: ${playError.message}`);
+      }
     }
+    setStatus(videoInput ? 'RECORDING VIDEO · 45S MAX' : 'RECORDING STILL · 45S MAX');
+  } catch (error) {
+    if (state.recorder && state.recorder.state !== 'inactive') {
+      state.recorder.onstop = null;
+      state.recorder.stop();
+    }
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    state.isRecording = false;
+    state.recorder = null;
+    state.stream = null;
+    state.recordStarting = false;
     document.body.classList.remove('is-recording');
-    $('recordLabel').textContent='RECORD';$('recState').textContent='';
-    setStatus(`RECORD FAILED: ${error.message}`,true);
+    $('recordLabel').textContent = 'RECORD';
+    $('recState').textContent = '';
+    if (state.imageReady) {
+      if (videoInput && state.type === 'video') {
+        video.loop = true;
+        $('playLabel').textContent = 'PLAY';
+        $('playIcon').textContent = '▶';
+        const [pw, ph] = previewSize();
+        changeVideoSourceSize(pw, ph);
+      }
+      const [pw, ph] = previewSize();
+      setRenderSize(pw, ph, true);
+      state.frameDirty = true;
+    }
+    syncRecordControls(false);
+    setStatus(`RECORD FAILED: ${error.message}`, true);
     console.error(error);
+  } finally {
+    if (!started) syncRecordControls(false);
   }
 }
 function stopRecording() {
-  if(!state.isRecording || !state.recorder) return;
-  const recorder=state.recorder;
-  state.isRecording=false;
-  if(state.type==='video' && state.element)state.element.pause();
-  if(recorder.state!=='inactive')recorder.stop();
+  if (!state.isRecording || !state.recorder) return;
+  const recorder = state.recorder;
+  state.isRecording = false;
+  $('recordButton').disabled = true;
+  if (state.type === 'video' && state.element) state.element.pause();
+  if (recorder.state !== 'inactive') recorder.stop();
 }
 function clearExport() {state.recordedBlob=null;state.recordedName='';$('exportPanel').hidden=true;}
 function setMode(mode) {
@@ -788,7 +884,7 @@ function bindEvents() {
     state.seed=Math.random()*120+1;resetFeedback();state.lastRenderTime=0;setStatus('RESEEDED');
   });
   $('renderQuality').addEventListener('change',e=>changeQuality(e.target.value));
-  $('importButton').addEventListener('click',()=>{if(!state.isRecording)$('fileInput').click();});
+  $('importButton').addEventListener('click',()=>{if(!state.isRecording && !state.recordStarting)$('fileInput').click();});
   $('emptyImport').addEventListener('click',()=>$('fileInput').click());
   $('fileInput').addEventListener('change',async event=>{
     const f=event.target.files?.[0];
@@ -834,6 +930,7 @@ function bindEvents() {
     if(state.isRecording){
       const elapsed=Math.min(MAX_RECORD_SECONDS,(performance.now()-state.recordStartedAt)/1000);
       $('recState').textContent=`● REC ${secondsToClock(elapsed)}`;
+      if (elapsed >= MAX_RECORD_SECONDS) stopRecording();
     }
   },250);
 }
@@ -857,6 +954,6 @@ function updateTouch(event) {
 document.addEventListener('DOMContentLoaded',()=>{
   bindEvents();
   if ('serviceWorker' in navigator && location.protocol==='https:') {
-    navigator.serviceWorker.register('./sw.js').catch(()=>{});
+    navigator.serviceWorker.register('./sw.js', {updateViaCache:'none'}).catch(()=>{});
   }
 });
