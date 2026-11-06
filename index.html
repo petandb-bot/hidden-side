@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no">
+  <meta name="theme-color" content="#10100f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="HIDDEN SIDE">
+  <meta name="description" content="写真と映像の裏側にある形を露出するイメージ・プロセッサ。">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./style.css">
+  <title>HIDDEN SIDE — image excavator</title>
+</head>
+<body>
+  <main id="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div class="brand-copy"><strong>HIDDEN SIDE</strong><small>IMAGE EXCAVATOR / 0.2</small></div></div>
+      <div class="top-meta"><span id="sourceTag">NO SIGNAL</span><span id="dimensionsTag">—</span></div>
+    </header>
+
+    <section id="stage" aria-label="画像処理プレビュー">
+      <div id="canvas-host"></div>
+      <div class="stage-crosshair stage-crosshair-tl" aria-hidden="true"></div>
+      <div class="stage-crosshair stage-crosshair-br" aria-hidden="true"></div>
+      <div class="stage-topline"><span id="modeIndex">01 / 05</span><span id="recState"></span></div>
+      <div id="emptyState" class="empty-state">
+        <div class="empty-symbol" aria-hidden="true"><div></div><div></div><div></div></div>
+        <div class="empty-title">WHAT LIVES UNDER<br>THE IMAGE?</div>
+        <p>写真か動画を選択してください。<br>輪郭、階調、色の内部を別の形で露出させます。</p>
+        <button id="emptyImport" class="outline-action" type="button">OPEN IMAGE / MOVIE <span>＋</span></button>
+      </div>
+      <div id="touchHint" class="touch-hint">TOUCH IMAGE TO EXPOSE</div>
+      <div class="stage-bottomline"><span id="assetName">NO SOURCE LOADED</span><span id="timecode">00:00</span></div>
+    </section>
+
+    <section class="control-area" aria-label="加工コントロール">
+      <div class="section-heading"><span>PROCESSES <span class="muted">/ 05</span></span><button id="reroll" class="plain-button" type="button" aria-label="変化パターンを再生成">RESEED <span>↻</span></button></div>
+      <div class="mode-strip" id="modes" role="group" aria-label="加工モード">
+        <button type="button" class="mode-button active" data-mode="0"><span class="mode-num">01</span><span class="mode-name">UNDER</span><span class="mode-sub">深層露出</span></button>
+        <button type="button" class="mode-button" data-mode="1"><span class="mode-num">02</span><span class="mode-name">NEGATIVE</span><span class="mode-sub">反転像</span></button>
+        <button type="button" class="mode-button" data-mode="2"><span class="mode-num">03</span><span class="mode-name">RELIEF</span><span class="mode-sub">浮彫り</span></button>
+        <button type="button" class="mode-button" data-mode="3"><span class="mode-num">04</span><span class="mode-name">SEEP</span><span class="mode-sub">侵食</span></button>
+        <button type="button" class="mode-button" data-mode="4"><span class="mode-num">05</span><span class="mode-name">GHOST</span><span class="mode-sub">残像層</span></button>
+      </div>
+      <div class="description" id="modeDescription">暗部が空洞化し、皮膚や物質の境界から異質な色層が浮き上がる。</div>
+      <div class="sliders">
+        <label class="parameter"><div class="parameter-info"><span>DEPTH <small>露出深度</small></span><output id="depthValue">62</output></div><input id="depth" type="range" min="0" max="100" value="62"></label>
+        <label class="parameter"><div class="parameter-info"><span>EROSION <small>侵食量</small></span><output id="erosionValue">56</output></div><input id="erosion" type="range" min="0" max="100" value="56"></label>
+        <label class="parameter"><div class="parameter-info"><span>DRIFT <small>変動速度</small></span><output id="driftValue">24</output></div><input id="drift" type="range" min="0" max="100" value="24"></label>
+      </div>
+      <div class="render-config">
+        <label for="renderQuality">GPU LOAD <span class="gpu-sub">プレビュー品質</span></label>
+        <select id="renderQuality" aria-label="GPU処理負荷">
+          <option value="eco">ECO / 520</option>
+          <option value="balanced" selected>BALANCED / 720</option>
+          <option value="fine">FINE / 960</option>
+        </select>
+        <span>EXPORT : HIGHER RESOLUTION</span>
+      </div>
+    </section>
+
+    <footer class="actionbar">
+      <button type="button" id="importButton" class="action dark"><span class="action-icon">＋</span><span>IMPORT</span></button>
+      <button type="button" id="playButton" class="action dark" disabled><span class="action-icon" id="playIcon">▶</span><span id="playLabel">PLAY</span></button>
+      <button type="button" id="saveButton" class="action light" disabled><span class="action-icon">↓</span><span>SAVE IMAGE</span></button>
+      <button type="button" id="recordButton" class="action accent" disabled><span class="record-dot"></span><span id="recordLabel">RECORD</span></button>
+    </footer>
+    <div class="bottom-note" id="status" role="status" aria-live="polite">LOCAL PROCESSING · FILES ARE NOT UPLOADED</div>
+  </main>
+
+  <input id="fileInput" type="file" accept="image/*,video/*,.mov,.mp4,.m4v,.webm" hidden>
+  <div id="exportPanel" class="export-overlay" hidden role="dialog" aria-label="動画の書き出し">
+    <div class="export-sheet">
+      <div class="sheet-heading"><span>VIDEO READY</span><button type="button" id="closeExport" aria-label="閉じる">×</button></div>
+      <p id="exportDetails">加工済みの映像を作成しました。</p>
+      <div class="export-actions"><button type="button" id="shareVideo" class="outline-action">SHARE VIDEO</button><button type="button" id="downloadVideo" class="outline-action primary">SAVE FILE ↓</button></div>
+      <small>iPhoneでは「共有」から「ビデオを保存」または「“ファイル”に保存」を選択できます。保存方法は端末と形式に依存します。</small>
+    </div>
+  </div>
+  <video id="sourceVideo" muted playsinline webkit-playsinline preload="auto" style="display:none"></video>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.13/lib/p5.min.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
