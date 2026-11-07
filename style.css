@@ -68,6 +68,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .plain-button { color: #86817f; background: none; border: 0; padding: 2px 0 2px 8px; font-size: 9px; letter-spacing: .13em; font-weight: 400; }
 .plain-button:hover { color: #c3bfc0; }
 .mode-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+.variant-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 11px; margin-bottom: 11px; }
+.variant-button { min-height: 30px; background: transparent; border: 1px solid #353331; color: #8a8782; font-size: 9px; letter-spacing: .15em; padding: 8px 10px; }
+.variant-button.active { border-color: #7d6b93; color: #d4cade; background: rgba(124, 107, 146, 0.08); }
+.variant-button:hover { color: #c8c3cb; border-color: #5a515f; }
+
 .mode-button { border: 0; border-bottom: 1px solid #403f3d; border-radius: 0; background: transparent; padding: 6px 0 10px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; color: #908d8a; text-align: left; min-width: 0; min-height: 52px; }
 .mode-button:hover:not(.active) { color: #d2ceca; border-bottom-color: #68635e; }
 .mode-button.active { color: var(--ink); border-bottom-color: var(--accent); }
@@ -83,7 +88,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .parameter input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 12px; height: 12px; margin-top: -5.5px; border-radius: 50%; border: 1px solid #d0c1d7; background: #a797b9; box-shadow: 0 0 0 2px #151515; }
 .parameter input::-moz-range-track { background: #4b4947; height: 1px; }
 .parameter input::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #d0c1d7; background: #a797b9; }
-.render-config { display: flex; gap: 10px; align-items: center; margin-top: 11px; color: var(--dim); font-size: 9px; letter-spacing: .11em; }
+.render-config { display: flex; gap: 10px; align-items: center; margin-top: 9px; color: var(--dim); font-size: 9px; letter-spacing: .11em; }
 .render-config label { white-space: nowrap; }
 .render-config select { color: #aaa6a1; background: transparent; border: 0; border-bottom: 1px solid #55514f; border-radius: 0; padding: 3px 16px 4px 0; min-width: 116px; max-width: 160px; font-size: 9px; outline-offset: 2px; }
 .actionbar { flex: none; display: grid; grid-template-columns: 1fr .86fr 1.25fr 1.1fr; padding: 12px 20px 4px; gap: 9px; border-top: 1px solid var(--line-soft); }

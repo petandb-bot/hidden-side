@@ -1,4 +1,4 @@
-# HIDDEN SIDE v0.3.2
+# HIDDEN SIDE v0.3.3
 
 GPU image excavator for photographs and moving images.
 

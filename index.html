@@ -11,13 +11,13 @@
   <link rel="manifest" href="./manifest.webmanifest">
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icon-192.png">
-  <link rel="stylesheet" href="./style.css?v=031">
+  <link rel="stylesheet" href="./style.css?v=033">
   <title>HIDDEN SIDE — image excavator</title>
 </head>
 <body>
   <main id="app">
     <header class="topbar">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div class="brand-copy"><strong>HIDDEN SIDE</strong><small>IMAGE EXCAVATOR / 0.3.2</small></div></div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span><div class="brand-copy"><strong>HIDDEN SIDE</strong><small>IMAGE EXCAVATOR / 0.3.3</small></div></div>
       <div class="top-meta"><span id="sourceTag">NO SIGNAL</span><span id="dimensionsTag">—</span></div>
     </header>
 
@@ -43,10 +43,14 @@
         <button type="button" class="mode-button" data-mode="3"><span class="mode-num">04</span><span class="mode-name">SEEP</span></button>
         <button type="button" class="mode-button" data-mode="4"><span class="mode-num">05</span><span class="mode-name">GHOST</span></button>
       </div>
+      <div class="variant-strip" id="variantStrip" role="group" aria-label="Variant profile">
+        <button type="button" class="variant-button active" data-variant="0" aria-pressed="true">QUIET</button>
+        <button type="button" class="variant-button" data-variant="1" aria-pressed="false">WILD</button>
+      </div>
       <div class="sliders">
-        <label class="parameter"><div class="parameter-info"><span>DEPTH</span><output id="depthValue">48</output></div><input id="depth" type="range" min="0" max="100" value="48"></label>
-        <label class="parameter"><div class="parameter-info"><span>EROSION</span><output id="erosionValue">34</output></div><input id="erosion" type="range" min="0" max="100" value="34"></label>
-        <label class="parameter"><div class="parameter-info"><span>DRIFT</span><output id="driftValue">20</output></div><input id="drift" type="range" min="0" max="100" value="20"></label>
+        <label class="parameter"><div class="parameter-info"><span>DEPTH</span><output id="depthValue">50</output></div><input id="depth" type="range" min="0" max="100" value="50"></label>
+        <label class="parameter"><div class="parameter-info"><span>EROSION</span><output id="erosionValue">36</output></div><input id="erosion" type="range" min="0" max="100" value="36"></label>
+        <label class="parameter"><div class="parameter-info"><span>DRIFT</span><output id="driftValue">22</output></div><input id="drift" type="range" min="0" max="100" value="22"></label>
       </div>
       <div class="render-config">
         <label for="renderQuality">QUALITY</label>
@@ -78,6 +82,6 @@
   </div>
   <video id="sourceVideo" muted playsinline webkit-playsinline preload="auto" style="display:none"></video>
   <script src="https://cdn.jsdelivr.net/npm/p5@1.11.13/lib/p5.min.js"></script>
-  <script src="./app.js?v=031"></script>
+  <script src="./app.js?v=033"></script>
 </body>
 </html>

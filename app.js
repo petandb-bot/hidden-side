@@ -1,4 +1,4 @@
-/* HIDDEN SIDE v0.3.2 | p5.js 1.11.13 | WebGL1 | local GPU processing */
+/* HIDDEN SIDE v0.3.3 | p5.js 1.11.13 | WebGL1 | local GPU processing */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
@@ -16,7 +16,8 @@ const MAX_HISTORY_EDGE = 448;
 
 const state = {
   type: 'none', element: null, fileName: '', objectUrl: null,
-  mode: 0, seed: 11.726, depth: 0.48, erosion: 0.34, drift: 0.20,
+  mode: 0, seed: 11.726, depth: 0.50, erosion: 0.36, drift: 0.22,
+  modeVariants: [0,0,0,0,0],
   w: 4, h: 4, originalW: 4, originalH: 4,
   renderW: 4, renderH: 4, sourceW: 0, sourceH: 0,
   quality: 'balanced', frameDirty: false, frameTime: -1, imageReady: false,
@@ -144,6 +145,7 @@ const FRAGMENT_SHADER = `
   uniform float u_time;
   uniform float u_seed;
   uniform float u_mode;
+  uniform float u_variant;
   uniform float u_depth;
   uniform float u_erosion;
   uniform float u_drift;
@@ -174,10 +176,10 @@ const FRAGMENT_SHADER = `
     return n;
   }
   vec3 src(vec2 uv) {
-    return texture2D(u_source,clamp(uv,vec2(0.001),vec2(0.999))).rgb;
+    return texture2D(u_source, clamp(uv, vec2(0.001), vec2(0.999))).rgb;
   }
   vec3 past(vec2 uv) {
-    return texture2D(u_history,clamp(uv,vec2(0.001),vec2(0.999))).rgb;
+    return texture2D(u_history, clamp(uv, vec2(0.001), vec2(0.999))).rgb;
   }
 
   void main() {
@@ -185,144 +187,151 @@ const FRAGMENT_SHADER = `
     vec2 aspect = vec2(u_resolution.x/u_resolution.y,1.0);
     float d = u_depth;
     float e = u_erosion;
-    float t = u_time * (0.58 + u_drift * 0.62);
+    float variant = u_variant;
+    float t = u_time * (0.62 + u_drift * 0.70);
     float kinetic = sat(u_kinetic);
     vec2 field = uv*vec2(5.7,9.1) + vec2(u_seed,u_seed*0.31);
-    float n = fbm(field + vec2(t*0.19,-t*0.13));
-    float medium = fbm(field*2.5 - vec2(t*0.22,-t*0.16));
+    float n = fbm(field + vec2(t*0.20,-t*0.14));
+    float medium = fbm(field*2.6 - vec2(t*0.24,-t*0.17));
     float micro = hash21(floor(uv*u_resolution*0.48) + u_seed*13.5);
     float dist = length((uv-u_pointer)*aspect);
     float probe = exp(-dist*dist/(0.018+d*0.012)) * u_touch;
-    float gesture = probe*(0.34+kinetic*0.42);
+    float gesture = probe*(0.34+kinetic*0.48);
 
     vec2 flow = vec2(noise2(field*1.35+t*0.28)-0.5,
                      noise2(field*1.28+12.8-t*0.25)-0.5);
-    vec2 displaced = uv + flow*(0.0010+e*0.0075)*(0.22+u_drift*0.65);
-    displaced += flow*gesture*(0.012 + kinetic*0.028);
+    float baseDisp = 0.0012 + e*0.0082 + variant*0.0015;
+    vec2 displaced = uv + flow*baseDisp*(0.22+u_drift*0.70);
+    displaced += flow*gesture*(0.013 + kinetic*0.030 + variant*0.006);
     if(u_mode>3.5) {
-      float row = floor(uv.y*118.0+t*1.1);
-      float breakup = step(0.978-0.018*e,hash21(vec2(row,floor(t*0.4)+u_seed)));
-      displaced.x += breakup*(noise2(vec2(row,t+u_seed))-0.5)*e*0.018;
+      float row = floor(uv.y*118.0+t*(1.1+0.4*variant));
+      float breakup = step(0.980-0.024*e-0.020*variant,hash21(vec2(row,floor(t*0.5)+u_seed)));
+      displaced.x += breakup*(noise2(vec2(row,t+u_seed))-0.5)*e*(0.022+0.020*variant);
     }
     displaced = clamp(displaced,vec2(0.001),vec2(0.999));
     vec3 c = src(displaced);
     float l = lum(c);
-    vec2 stepUV = u_texel*(1.10+1.05*d);
+    vec2 stepUV = u_texel*(1.10+1.12*d+0.18*variant);
     float gx = lum(src(displaced+vec2(stepUV.x,0.0))) - lum(src(displaced-vec2(stepUV.x,0.0)));
     float gy = lum(src(displaced+vec2(0.0,stepUV.y))) - lum(src(displaced-vec2(0.0,stepUV.y)));
-    float edge = sat(length(vec2(gx,gy))*(2.6+3.6*d));
+    float edge = sat(length(vec2(gx,gy))*(2.6+3.8*d+0.4*variant));
     float outline = smoothstep(0.16,0.44,edge);
     float organ = n*0.74+medium*0.26;
     vec3 color = c;
 
     if (u_mode<0.5) {
-      float shear = noise2(uv*vec2(2.8,6.2)+vec2(t*0.05,u_seed*0.23));
-      float fault = smoothstep(0.46,0.67,shear+outline*0.05);
-      float stratum = l + (organ-0.5)*(0.11+0.21*e)
-                    + (fault-0.5)*e*0.12 + (micro-0.5)*e*0.02;
-      stratum += gesture*(0.08+0.08*e)*(0.5+fault*0.5);
+      float shear = noise2(uv*vec2(2.8,6.2)+vec2(t*(0.05+0.02*variant),u_seed*0.23));
+      float fault = smoothstep(0.46-0.03*variant,0.67,shear+outline*(0.05+0.05*variant));
+      float stratum = l + (organ-0.5)*(0.12+0.23*e+0.08*variant)
+                    + (fault-0.5)*e*(0.12+0.10*variant) + (micro-0.5)*e*(0.02+0.03*variant);
+      stratum += gesture*(0.08+0.08*e+0.06*variant)*(0.5+fault*0.5);
       float a = smoothstep(0.18-0.04*d,0.44-0.04*d,stratum);
       float b = smoothstep(0.46-0.03*d,0.69-0.03*d,stratum);
-      float top = smoothstep(0.66-0.03*d,0.84-0.02*d,stratum+medium*0.05);
-      vec3 ink = vec3(0.038,0.031,0.070);
-      vec3 purple = vec3(0.24,0.10,0.40);
+      float top = smoothstep(0.66-0.03*d,0.84-0.02*d,stratum+medium*(0.05+0.05*variant));
+      vec3 ink = mix(vec3(0.038,0.031,0.070), vec3(0.030,0.018,0.080), variant);
+      vec3 purple = mix(vec3(0.24,0.10,0.40), vec3(0.30,0.08,0.50), variant);
       vec3 flesh = vec3(0.74,0.61,0.70);
-      vec3 acid = vec3(0.47,0.50,0.12);
+      vec3 acid = mix(vec3(0.47,0.50,0.12), vec3(0.58,0.62,0.10), variant);
       color = mix(ink,purple,a);
       color = mix(color,flesh,b);
-      float vein = top*(smoothstep(0.34,0.73,medium)*0.48+outline*0.18);
-      color = mix(color,acid,sat(vein)*0.55);
-      color = mix(color,vec3(0.02,0.02,0.03),outline*(0.38+0.08*d));
-      color += (micro-0.5)*(0.030*e);
+      float vein = top*(smoothstep(0.34,0.73,medium)*(0.48+0.18*variant)+outline*(0.18+0.10*variant));
+      color = mix(color,acid,sat(vein)*(0.55+0.18*variant));
+      color = mix(color,vec3(0.02,0.02,0.03),outline*(0.38+0.12*d+0.12*variant));
+      color += (micro-0.5)*(0.030*e+0.025*variant*e);
       color = mix(color, vec3(l), 0.08);
-      color = mix(color, c, 0.12);
+      color = mix(color, c, 0.10-0.04*variant);
       if(u_historyMix>0.5) {
-        vec3 remnant = past(uv+flow*(0.002+0.006*e));
-        color = mix(color,remnant,(0.16+0.12*d)*u_memory);
+        vec3 remnant = past(uv+flow*(0.002+0.008*e+0.005*variant));
+        color = mix(color,remnant,(0.16+0.12*d+0.10*variant)*u_memory);
       }
     } else if (u_mode<1.5) {
-      vec3 neg = pow(sat3(1.0-c),vec3(0.92+0.10*d));
-      color = mix(neg,vec3(0.90,0.92,0.95),0.06+e*0.08);
+      vec3 neg = pow(sat3(1.0-c),vec3(0.92+0.10*d-0.08*variant));
+      color = mix(neg,vec3(0.90,0.92,0.95),0.06+e*0.08+0.08*variant);
       float warmth = smoothstep(0.22,0.61,l)*(1.0-smoothstep(0.66,0.95,l));
-      color = mix(color,vec3(0.46,0.35,0.38),warmth*(0.08+0.16*d));
+      color = mix(color,vec3(0.46,0.35,0.38),warmth*(0.08+0.16*d+0.08*variant));
       float exposureLevel = 0.40 + 0.12*noise2(vec2(t*0.08+u_seed,3.7));
-      float latent = (1.0-smoothstep(0.055,0.16,abs(l-exposureLevel)));
-      latent *= smoothstep(0.34,0.74,organ)*(0.12+0.20*e);
-      color = mix(color,vec3(0.95,0.95,0.90),latent);
-      vec2 fringe = vec2(gx,gy)*u_texel*(2.8+8.0*e);
-      float cyanRim = outline*(0.16+0.20*e);
-      color = mix(color,vec3(0.32,0.66,0.80),cyanRim);
-      color.r += (src(displaced+fringe).r-c.r)*0.08*e;
-      color.b += (src(displaced-fringe).b-c.b)*0.07*e;
-      color = mix(color,vec3(0.33,0.30,0.42),(micro-0.53)*e*0.05);
-      color = mix(color,c,0.10);
-      color = mix(color,vec3(0.93,0.96,0.98),gesture*(0.10+0.08*d));
+      float latent = (1.0-smoothstep(0.055,0.16-0.03*variant,abs(l-exposureLevel)));
+      latent *= smoothstep(0.34,0.74,organ)*(0.12+0.20*e+0.18*variant);
+      color = mix(color, mix(vec3(0.95,0.95,0.90), vec3(0.98,0.98,0.95), variant), latent);
+      vec2 fringe = vec2(gx,gy)*u_texel*(2.8+8.0*e+6.0*variant);
+      float cyanRim = outline*(0.16+0.20*e+0.14*variant);
+      color = mix(color,mix(vec3(0.32,0.66,0.80), vec3(0.38,0.74,0.88), variant),cyanRim);
+      color.r += (src(displaced+fringe).r-c.r)*(0.08+0.08*variant)*e;
+      color.b += (src(displaced-fringe).b-c.b)*(0.07+0.09*variant)*e;
+      color = mix(color,vec3(0.33,0.30,0.42),(micro-0.53)*e*(0.05+0.08*variant));
+      color = mix(color,c,0.16-0.08*variant);
+      color = mix(color,vec3(0.93,0.96,0.98),gesture*(0.10+0.08*d+0.08*variant));
     } else if (u_mode<2.5) {
-      float angle = t*0.15+u_seed*0.07;
+      float angle = t*(0.15+0.04*variant)+u_seed*0.07;
       vec3 lightDirection = normalize(vec3(-0.62*cos(angle)-0.18,
                                             0.48*sin(angle*0.76+0.6)+0.20,0.76));
-      vec3 normal = normalize(vec3(-gx*(3.2+d*6.2),-gy*(3.2+d*6.2),0.52+0.16*(1.0-d)));
+      vec3 normal = normalize(vec3(-gx*(3.2+d*6.2+1.5*variant),-gy*(3.2+d*6.2+1.5*variant),0.52+0.16*(1.0-d)));
       float light = sat(dot(normal,lightDirection)*0.55+0.36);
-      float elevation = l+(organ-0.5)*0.09*e + gesture*(0.06+0.08*e);
-      float bands = 8.0 + d*16.0;
+      float elevation = l+(organ-0.5)*(0.09+0.08*variant)*e + gesture*(0.06+0.08*e);
+      float bands = 8.0 + d*16.0 + variant*6.0;
       float contour = 1.0-smoothstep(0.018,0.060,abs(fract(elevation*bands)-0.5));
       vec3 chalk = mix(vec3(0.13,0.13,0.15),vec3(0.67,0.63,0.58),light);
-      chalk = mix(chalk,vec3(0.88,0.84,0.78),smoothstep(0.50,0.86,elevation)*0.42);
+      vec3 halo = vec3(0.86,0.84,0.80);
+      chalk = mix(chalk,halo,smoothstep(0.50,0.86,elevation)*(0.42+0.20*variant));
       color = mix(chalk,vec3(0.07,0.07,0.08),contour*(0.14+0.22*e));
-      color = mix(color,vec3(0.04,0.04,0.05),outline*0.18);
-      color += (micro-0.5)*e*0.05;
-      color = mix(color, c, 0.10);
+      color = mix(color,vec3(0.04,0.04,0.05),outline*(0.18+0.10*variant));
+      color += (micro-0.5)*e*(0.05+0.04*variant);
+      color += halo*outline*variant*0.08;
+      color = mix(color, c, 0.10-0.03*variant);
     } else if (u_mode<3.5) {
-      float liquid = l+(organ-0.52)*(0.24*e)-outline*0.09;
-      liquid += (noise2(field*0.55 + vec2(t*0.05,-t*0.03))-0.5)*e*0.11;
+      float liquid = l+(organ-0.52)*(0.24*e+0.12*variant)-outline*(0.09-0.03*variant);
+      liquid += (noise2(field*0.55 + vec2(t*0.05,-t*0.03))-0.5)*e*(0.11+0.12*variant);
       liquid -= gesture*(0.07+0.11*e);
       float stain = smoothstep(0.28-0.08*d,0.53,liquid);
-      float crust = smoothstep(0.52,0.78,liquid+medium*0.08);
+      float crust = smoothstep(0.52-0.03*variant,0.78,liquid+medium*(0.08+0.10*variant));
       vec3 black = vec3(0.032,0.031,0.040);
-      vec3 lilac = vec3(0.36,0.24,0.54);
-      vec3 pallid = vec3(0.80,0.75,0.78);
+      vec3 lilac = mix(vec3(0.36,0.24,0.54), vec3(0.44,0.28,0.62), variant);
+      vec3 pallid = mix(vec3(0.80,0.75,0.78), vec3(0.86,0.82,0.84), variant);
       color = mix(black,lilac,stain);
       color = mix(color,pallid,crust);
-      float seep = smoothstep(0.58,0.82,organ+outline*0.14)*(1.0-smoothstep(0.86,1.0,l));
-      color = mix(color,vec3(0.54,0.56,0.16),seep*(0.10+0.24*e));
-      color *= (1.0-0.24*outline);
-      color += (micro-0.5)*0.05*e;
-      color = mix(color, c, 0.10);
+      float seep = smoothstep(0.58-0.05*variant,0.82,organ+outline*(0.14+0.12*variant))*(1.0-smoothstep(0.86,1.0,l));
+      color = mix(color,mix(vec3(0.54,0.56,0.16), vec3(0.66,0.68,0.18), variant),seep*(0.10+0.24*e+0.14*variant));
+      float film = smoothstep(0.45,0.86,organ+medium*0.12);
+      color = mix(color, vec3(0.88,0.80,0.90), variant*film*(0.06+0.08*e));
+      color *= (1.0-(0.24-0.06*variant)*outline);
+      color += (micro-0.5)*(0.05+0.04*variant)*e;
+      color = mix(color, c, 0.10-0.04*variant);
       if(u_historyMix>0.5) {
-        vec3 residue = past(uv+flow*(0.002+0.008*e));
-        float pooling = (0.18+0.12*d)*u_memory*(0.90+0.10*outline);
+        vec3 residue = past(uv+flow*(0.002+0.008*e+0.008*variant));
+        float pooling = (0.18+0.12*d+0.12*variant)*u_memory*(0.90+0.10*outline);
         color = mix(color,residue,pooling);
       }
     } else {
-      vec2 shift = vec2(0.0018+0.010*e,0.0012+0.006*e);
-      shift *= vec2(sin(t*0.25+u_seed)*0.35+0.65,cos(t*0.23+u_seed)*0.35+0.65);
-      vec3 right = src(displaced+shift+flow*0.006);
-      vec3 left = src(displaced-shift*1.05);
-      vec3 ghost = vec3(right.r,c.g*0.72+right.b*0.14+left.g*0.14,left.b);
-      float corridor = fbm(uv*vec2(16.0,6.5)+vec2(-t*0.20,u_seed));
-      color = mix(c,ghost,0.28+0.18*e);
-      color = mix(color,vec3(0.055,0.06,0.078),0.09+0.09*d);
-      color += vec3(0.13,0.04,0.19)*outline*(0.06+0.16*e);
-      color += vec3(0.006,0.08,0.10)*(corridor-0.50)*e*0.18;
-      color += (micro-0.5)*e*0.025;
-      color += vec3(0.12,0.05,0.15)*gesture*(0.10+0.16*e);
+      vec2 shift = vec2(0.0026+0.013*e+0.006*variant,0.0018+0.007*e+0.003*variant);
+      shift *= vec2(sin(t*(0.25+0.05*variant)+u_seed)*0.35+0.70,cos(t*(0.23+0.05*variant)+u_seed)*0.35+0.70);
+      vec3 right = src(displaced+shift+flow*(0.007+0.010*variant));
+      vec3 left = src(displaced-shift*(1.08+0.35*variant));
+      vec3 ghost = vec3(right.r,c.g*(0.72-0.10*variant)+right.b*(0.14+0.08*variant)+left.g*0.14,left.b);
+      float corridor = fbm(uv*vec2(16.0,6.5)+vec2(-t*(0.20+0.08*variant),u_seed));
+      float spreadMix = 0.34 + 0.18*e + 0.14*variant;
+      color = mix(c,ghost,spreadMix);
+      color = mix(color,vec3(0.055,0.06,0.078),0.09+0.09*d+0.05*variant);
+      color += vec3(0.13,0.04,0.19)*outline*(0.08+0.22*e+0.14*variant);
+      color += vec3(0.010,0.10,0.12)*(corridor-0.50)*e*(0.24+0.28*variant);
+      color += (micro-0.5)*e*(0.030+0.050*variant);
+      color += vec3(0.12,0.05,0.15)*gesture*(0.12+0.18*e+0.12*variant);
       if(u_historyMix>0.5) {
-        vec2 pastUv = uv+flow*(0.0015+e*0.006)+vec2(sin(t*0.42),cos(t*0.31))*0.0012;
+        vec2 pastUv = uv+flow*(0.0020+e*(0.008+0.009*variant))+vec2(sin(t*(0.42+0.08*variant)),cos(t*(0.31+0.07*variant)))*(0.0015+0.0020*variant);
         vec3 residual = past(pastUv);
-        color = mix(color,residual,(0.28+0.10*d)*u_memory);
+        color = mix(color,residual,(0.40+0.12*d+0.18*variant)*u_memory);
       }
-      color = mix(color, c, 0.18);
+      color = mix(color, c, 0.16-0.05*variant);
     }
 
     float cl = lum(color);
     float srcLift = 0.18 + 0.72*l;
-    color = mix(color, color * (srcLift / max(0.10, cl)), 0.14);
-    color = mix(vec3(cl), color, 0.92);
-    color = color * 0.96 + vec3(0.018);
+    float clampMix = 0.12 + 0.04*(1.0-variant);
+    color = mix(color, color * (srcLift / max(0.10, cl)), clampMix);
+    color = mix(vec3(cl), color, 0.92 + 0.02*variant);
+    color = color * (0.955 + 0.02*variant) + vec3(0.018 - 0.004*variant);
     gl_FragColor = vec4(sat3(color),1.0);
   }
 `;
-
 function compileShader(type, text) {
   const shader = gl.createShader(type);
   gl.shaderSource(shader, text);
@@ -368,7 +377,7 @@ function initGL() {
   u = {};
   for (const name of ['u_source','u_history','u_historyMix','u_memory',
       'u_texel','u_resolution','u_pointer','u_touch','u_kinetic',
-      'u_time','u_seed','u_mode','u_depth','u_erosion','u_drift']) {
+      'u_time','u_seed','u_mode','u_variant','u_depth','u_erosion','u_drift']) {
     u[name] = gl.getUniformLocation(program,name);
   }
   gl.uniform1i(u.u_source,0);
@@ -461,6 +470,7 @@ function drawPass(targetFramebuffer, w, h, now) {
   gl.uniform1f(u.u_time,now);
   gl.uniform1f(u.u_seed,state.seed);
   gl.uniform1f(u.u_mode,state.mode);
+  gl.uniform1f(u.u_variant, state.modeVariants[state.mode] || 0);
   gl.uniform1f(u.u_depth,state.depth);
   gl.uniform1f(u.u_erosion,state.erosion);
   gl.uniform1f(u.u_drift,state.drift);
@@ -875,6 +885,32 @@ function setMode(mode) {
     b.classList.toggle('active',active);
     b.setAttribute('aria-pressed',String(active));
   });
+  updateVariantUI();
+}
+
+const VARIANT_LABELS = [
+  ['QUIET', 'WILD'],
+  ['PRINT', 'BLEACH'],
+  ['STONE', 'HALO'],
+  ['STAIN', 'FILM'],
+  ['SOFT', 'DENSE']
+];
+
+function updateVariantUI() {
+  const labels = VARIANT_LABELS[state.mode] || ['A', 'B'];
+  const buttons = document.querySelectorAll('.variant-button');
+  buttons.forEach((button, index) => {
+    button.textContent = labels[index] || (index === 0 ? 'A' : 'B');
+    const active = (state.modeVariants[state.mode] || 0) === index;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function setVariant(index) {
+  state.modeVariants[state.mode] = index;
+  resetFeedback();
+  updateVariantUI();
 }
 
 function bindEvents() {
@@ -890,6 +926,9 @@ function bindEvents() {
   });
   $('reroll').addEventListener('click',()=>{
     state.seed=Math.random()*120+1;resetFeedback();state.lastRenderTime=0;setStatus('RESEEDED');
+  });
+  document.querySelectorAll('.variant-button').forEach(button=>{
+    button.addEventListener('click', ()=> setVariant(Number(button.dataset.variant)));
   });
   $('renderQuality').addEventListener('change',e=>changeQuality(e.target.value));
   $('importButton').addEventListener('click',()=>{if(!state.isRecording && !state.recordStarting)$('fileInput').click();});
@@ -933,6 +972,7 @@ function bindEvents() {
     if(document.hidden&&state.isRecording)stopRecording();
   });
   setMode(0);
+  updateVariantUI();
   $('renderQuality').value=state.quality;
   $('depthValue').textContent=String(Math.round(state.depth*100)).padStart(2,'0');
   $('erosionValue').textContent=String(Math.round(state.erosion*100)).padStart(2,'0');
