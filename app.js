@@ -1,4 +1,4 @@
-/* HIDDEN SIDE v0.3.3 | p5.js 1.11.13 | WebGL1 | local GPU processing */
+/* HIDDEN SIDE v0.3.4 | p5.js 1.11.13 | WebGL1 | local GPU processing */
 'use strict';
 
 const $ = (id) => document.getElementById(id);
@@ -17,7 +17,7 @@ const MAX_HISTORY_EDGE = 448;
 const state = {
   type: 'none', element: null, fileName: '', objectUrl: null,
   mode: 0, seed: 11.726, depth: 0.50, erosion: 0.36, drift: 0.22,
-  modeVariants: [0,0,0,0,0],
+  modeVariants: [0,0,0,0,0], trail: 0.55,
   w: 4, h: 4, originalW: 4, originalH: 4,
   renderW: 4, renderH: 4, sourceW: 0, sourceH: 0,
   quality: 'balanced', frameDirty: false, frameTime: -1, imageReady: false,
@@ -137,6 +137,7 @@ const FRAGMENT_SHADER = `
   uniform sampler2D u_history;
   uniform float u_historyMix;
   uniform float u_memory;
+  uniform float u_trailRetention;
   uniform vec2 u_texel;
   uniform vec2 u_resolution;
   uniform vec2 u_pointer;
@@ -218,6 +219,7 @@ const FRAGMENT_SHADER = `
     float outline = smoothstep(0.16,0.44,edge);
     float organ = n*0.74+medium*0.26;
     vec3 color = c;
+    vec2 ghostPastUv = uv;
 
     if (u_mode<0.5) {
       float shear = noise2(uv*vec2(2.8,6.2)+vec2(t*(0.05+0.02*variant),u_seed*0.23));
@@ -315,12 +317,8 @@ const FRAGMENT_SHADER = `
       color += vec3(0.010,0.10,0.12)*(corridor-0.50)*e*(0.24+0.28*variant);
       color += (micro-0.5)*e*(0.030+0.050*variant);
       color += vec3(0.12,0.05,0.15)*gesture*(0.12+0.18*e+0.12*variant);
-      if(u_historyMix>0.5) {
-        vec2 pastUv = uv+flow*(0.0020+e*(0.008+0.009*variant))+vec2(sin(t*(0.42+0.08*variant)),cos(t*(0.31+0.07*variant)))*(0.0015+0.0020*variant);
-        vec3 residual = past(pastUv);
-        color = mix(color,residual,(0.40+0.12*d+0.18*variant)*u_memory);
-      }
       color = mix(color, c, 0.16-0.05*variant);
+      ghostPastUv = uv+flow*(0.0020+e*(0.008+0.009*variant))+vec2(sin(t*(0.42+0.08*variant)),cos(t*(0.31+0.07*variant)))*(0.0015+0.0020*variant);
     }
 
     float cl = lum(color);
@@ -329,6 +327,10 @@ const FRAGMENT_SHADER = `
     color = mix(color, color * (srcLift / max(0.10, cl)), clampMix);
     color = mix(vec3(cl), color, 0.92 + 0.02*variant);
     color = color * (0.955 + 0.02*variant) + vec3(0.018 - 0.004*variant);
+    // Blend only after grading, so retained frames are not graded repeatedly.
+    if (u_mode>3.5 && u_historyMix>0.5) {
+      color = mix(color,past(ghostPastUv),u_trailRetention);
+    }
     gl_FragColor = vec4(sat3(color),1.0);
   }
 `;
@@ -375,7 +377,7 @@ function initGL() {
     new Uint8Array([0,0,0,255]));
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,true);
   u = {};
-  for (const name of ['u_source','u_history','u_historyMix','u_memory',
+  for (const name of ['u_source','u_history','u_historyMix','u_memory','u_trailRetention',
       'u_texel','u_resolution','u_pointer','u_touch','u_kinetic',
       'u_time','u_seed','u_mode','u_variant','u_depth','u_erosion','u_drift']) {
     u[name] = gl.getUniformLocation(program,name);
@@ -462,6 +464,7 @@ function drawPass(targetFramebuffer, w, h, now) {
   gl.uniform1i(u.u_history,1);
   gl.uniform1f(u.u_historyMix, state.historyReady && (state.mode===0 || state.mode===3 || state.mode===4) ? 1 : 0);
   gl.uniform1f(u.u_memory, state.memoryFactor || 1);
+  gl.uniform1f(u.u_trailRetention, state.trailRetention);
   gl.uniform2f(u.u_texel,1/state.sourceW,1/state.sourceH);
   gl.uniform2f(u.u_resolution,w,h);
   gl.uniform2f(u.u_pointer,state.pointer[0],state.pointer[1]);
@@ -482,6 +485,10 @@ function renderFrame(now, updateHistory=true) {
   const elapsed = state.lastRenderTime > 0 ? Math.max(1/60, Math.min(0.15, now-state.lastRenderTime)) : 1/24;
   state.lastRenderTime = now;
   state.memoryFactor = Math.pow(0.98, elapsed*24);
+  // Ghost decay follows elapsed time; the range is approximately 0.08-3.2 seconds.
+  const dense = state.modeVariants[4] === 1;
+  const duration = (0.08 + 2.65 * Math.pow(state.trail, 2.0)) * (dense ? 1.20 : 1.0);
+  state.trailRetention = Math.min(0.990, Math.exp(-elapsed / duration));
   drawPass(null, canvas.width, canvas.height, now);
   if ((state.mode===0 || state.mode===3 || state.mode===4) && updateHistory) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, feedbackFramebuffer);
@@ -544,6 +551,7 @@ function clearPreviousSource() {
   if (state.objectUrl) {URL.revokeObjectURL(state.objectUrl); state.objectUrl=null;}
   state.sourceGeneration++;
   state.type='none'; state.element=null; state.frameDirty=false; state.imageReady=false;
+  $('timecode').textContent='';
   resetFeedback();
   state.videoReady=false; state.renderingError=false;
   state.frameTime=-1; state.touchForce=0; state.touchTarget=0;
@@ -614,7 +622,7 @@ async function openFile(file) {
       });
       setSourceDimensions(img.naturalWidth,img.naturalHeight);
       state.imageReady=true; state.frameDirty=true;
-      $('timecode').textContent='STILL';
+      $('timecode').textContent='';
       $('saveButton').disabled=false;
       $('recordButton').disabled=!canRecord();
       setStatus(canRecord() ? 'IMAGE READY' : 'IMAGE READY · RECORD UNSUPPORTED');
@@ -886,6 +894,7 @@ function setMode(mode) {
     b.setAttribute('aria-pressed',String(active));
   });
   updateVariantUI();
+  updateTrailUI();
 }
 
 const VARIANT_LABELS = [
@@ -913,6 +922,13 @@ function setVariant(index) {
   updateVariantUI();
 }
 
+function updateTrailUI() {
+  const isGhost = state.mode === 4;
+  $('trailControl').hidden = !isGhost;
+  $('variantRow').classList.toggle('has-trail', isGhost);
+  $('trailValue').textContent = String(Math.round(state.trail * 100)).padStart(2, '0');
+}
+
 function bindEvents() {
   ['depth','erosion','drift'].forEach(id=>{
     $(id).addEventListener('input',()=>{
@@ -926,6 +942,11 @@ function bindEvents() {
   });
   $('reroll').addEventListener('click',()=>{
     state.seed=Math.random()*120+1;resetFeedback();state.lastRenderTime=0;setStatus('RESEEDED');
+  });
+  $('trail').addEventListener('input',()=>{
+    const value=Number($('trail').value);
+    state.trail=value/100;
+    $('trailValue').textContent=String(value).padStart(2,'0');
   });
   document.querySelectorAll('.variant-button').forEach(button=>{
     button.addEventListener('click', ()=> setVariant(Number(button.dataset.variant)));
@@ -973,6 +994,8 @@ function bindEvents() {
   });
   setMode(0);
   updateVariantUI();
+  $('trail').value = Math.round(state.trail * 100);
+  updateTrailUI();
   $('renderQuality').value=state.quality;
   $('depthValue').textContent=String(Math.round(state.depth*100)).padStart(2,'0');
   $('erosionValue').textContent=String(Math.round(state.erosion*100)).padStart(2,'0');

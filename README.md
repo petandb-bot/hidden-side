@@ -1,4 +1,4 @@
-# HIDDEN SIDE v0.3.3
+# HIDDEN SIDE v0.3.4
 
 GPU image excavator for photographs and moving images.
 
@@ -12,7 +12,7 @@ GPU image excavator for photographs and moving images.
 
 ## Processing
 
-Five modes remain: UNDER, NEGATIVE, RELIEF, SEEP, GHOST. Touch interaction, feedback textures, and DEPTH / EROSION / DRIFT are unchanged. The interface has been simplified to restrained typography, minimal boundaries, and a quieter action area.
+Five modes remain: UNDER, NEGATIVE, RELIEF, SEEP, GHOST. Touch interaction and DEPTH / EROSION / DRIFT remain unchanged. The interface has been simplified to restrained typography, minimal boundaries, and a quieter action area.
 
 ## Runtime
 
@@ -26,3 +26,12 @@ Five modes remain: UNDER, NEGATIVE, RELIEF, SEEP, GHOST. Touch interaction, feed
 ## Limits
 
 Recording remains silent, real time, and at most 45 seconds. 4K output, lossless video, audio preservation, and offline frame-accurate conversion are not supported.
+
+## v0.3.4 — Ghost trail
+
+- GHOST exposes an additional TRAIL control beside the SOFT / DENSE selector.
+- TRAIL changes the temporal decay of the existing GPU feedback buffer using elapsed-time exponential retention. No additional render targets or per-frame CPU readbacks are required.
+- SOFT / DENSE preserve their v0.3.3 colors and spatial breakup. DENSE extends the decay slightly.
+- Changing TRAIL preserves accumulated traces; switching modes, switching variants, or RESEED resets the feedback buffer.
+- The redundant STILL label within the image stage is removed. Video timecodes and recording indicators remain.
+- Further RESEED strategies and rare accidents are deferred to the next versions.

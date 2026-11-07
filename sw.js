@@ -1,5 +1,5 @@
-const VERSION = 'hidden-side-v0.3.1';
-const ASSETS = ['./', './index.html', './app.js', './style.css', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest'];
+const VERSION = 'hidden-side-v0.3.4';
+const ASSETS = ['./', './index.html', './app.js?v=034', './style.css?v=034', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(VERSION).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
 });
